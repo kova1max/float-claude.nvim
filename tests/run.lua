@@ -89,6 +89,14 @@ test("single line: opens under the cursor with the text in the cursor column", f
   eq("floatcc", lua("return vim.bo.filetype"), "filetype")
 end)
 
+test("opens on the line below the cursor in a window with a winbar", function()
+  setup_buffer()
+  lua("vim.o.winbar = 'bar'")
+  local cursor_row = lua("return vim.fn.screenpos(0, 7, 6).row - 1")
+  open()
+  eq(cursor_row + 1, popup().row, "popup row")
+end)
+
 test("single line: Enter submits exactly the typed text and restores focus", function()
   setup_buffer()
   open()

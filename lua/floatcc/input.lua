@@ -55,7 +55,7 @@ function M.open(opts)
   local origin_cursor = vim.api.nvim_win_get_cursor(origin_win)
   local origin_insert = vim.fn.mode() == "i"
   local win_pos = vim.fn.win_screenpos(origin_win)
-  local row = win_pos[1] - 1 + vim.fn.winline() - 1
+  local row = win_pos[1] - 1 + vim.fn.getwininfo(origin_win)[1].winbar + vim.fn.winline() - 1
   local col = win_pos[2] - 1 + vim.fn.wincol() - 1
 
   local buf = vim.api.nvim_create_buf(false, true)
