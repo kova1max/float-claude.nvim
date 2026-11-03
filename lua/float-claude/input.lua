@@ -1,7 +1,7 @@
 -- Cursor-anchored, borderless input popup. Pure Lua, no plugin dependencies.
 local M = {}
 
-local ns = vim.api.nvim_create_namespace("floatcc")
+local ns = vim.api.nvim_create_namespace("float-claude")
 
 local PREFIX_WIDTH = 3 -- " ❯ " on the first line, three spaces on the others
 local MIN_WIDTH = 26
@@ -10,8 +10,8 @@ local MAX_HEIGHT = 8
 
 local function set_highlights()
   -- `default = true` lets colorschemes and users override these.
-  vim.api.nvim_set_hl(0, "FloatCCNormal", { default = true, fg = "#e6e6e6", bg = "#1c1c1f" })
-  vim.api.nvim_set_hl(0, "FloatCCPrompt", { default = true, fg = "#3fb5c9", bg = "#1c1c1f" })
+  vim.api.nvim_set_hl(0, "FloatClaudeNormal", { default = true, fg = "#e6e6e6", bg = "#1c1c1f" })
+  vim.api.nvim_set_hl(0, "FloatClaudePrompt", { default = true, fg = "#3fb5c9", bg = "#1c1c1f" })
 end
 
 -- The prefix is virtual text, so the buffer holds exactly what the user typed.
@@ -19,7 +19,7 @@ local function draw_prefix(buf)
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for lnum = 0, vim.api.nvim_buf_line_count(buf) - 1 do
     vim.api.nvim_buf_set_extmark(buf, ns, lnum, 0, {
-      virt_text = { lnum == 0 and { " ❯ ", "FloatCCPrompt" } or { "   ", "FloatCCNormal" } },
+      virt_text = { lnum == 0 and { " ❯ ", "FloatClaudePrompt" } or { "   ", "FloatClaudeNormal" } },
       virt_text_pos = "inline",
       right_gravity = false, -- keep the prefix left of text typed at column 0
     })
@@ -40,14 +40,14 @@ local function win_config(buf, row, col)
   return { relative = "editor", row = top, col = col - PREFIX_WIDTH, width = width, height = height }, longest
 end
 
----@class floatcc.InputOpts
+---@class float-claude.InputOpts
 ---@field default? string Initial text; may contain "\n" in multiline mode.
 ---@field multiline? boolean Shift-Enter / Ctrl-J insert a newline; Enter still submits.
 ---@field on_submit fun(text: string) Receives the typed lines joined with "\n".
 ---@field on_cancel? fun()
 
 ---Open the popup at the cursor of the current window.
----@param opts floatcc.InputOpts
+---@param opts float-claude.InputOpts
 function M.open(opts)
   set_highlights()
 
@@ -60,7 +60,7 @@ function M.open(opts)
 
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
-  vim.bo[buf].filetype = "floatcc"
+  vim.bo[buf].filetype = "float-claude"
   local lines = vim.split(opts.default or "", "\n", { plain = true })
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   draw_prefix(buf)
@@ -75,7 +75,7 @@ function M.open(opts)
   vim.wo[win].scrolloff = 0
   vim.wo[win].sidescrolloff = 0
   vim.wo[win].winhighlight =
-    "Normal:FloatCCNormal,NormalNC:FloatCCNormal,NormalFloat:FloatCCNormal,EndOfBuffer:FloatCCNormal"
+    "Normal:FloatClaudeNormal,NormalNC:FloatClaudeNormal,NormalFloat:FloatClaudeNormal,EndOfBuffer:FloatClaudeNormal"
   vim.api.nvim_win_set_cursor(win, { #lines, #lines[#lines] })
   vim.cmd("startinsert!")
 

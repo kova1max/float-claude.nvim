@@ -49,7 +49,7 @@ local function open(opts)
     local opts = ...
     opts.on_submit = function(text) vim.g.result = text end
     opts.on_cancel = function() vim.g.cancelled = true end
-    require("floatcc.input").open(opts)
+    require("float-claude.input").open(opts)
   ]],
     opts or {}
   )
@@ -86,7 +86,7 @@ test("single line: opens under the cursor with the text in the cursor column", f
   open()
   eq("i", lua("return vim.fn.mode()"), "mode")
   eq({ row = 7, col = cursor_col - 3, width = 26, height = 1 }, popup(), "popup")
-  eq("floatcc", lua("return vim.bo.filetype"), "filetype")
+  eq("float-claude", lua("return vim.bo.filetype"), "filetype")
 end)
 
 test("opens on the line below the cursor in a window with a winbar", function()
@@ -109,7 +109,7 @@ test("prefix is virtual and stays left of text typed at column 0", function()
   open({ default = "world" })
   keys("<Home>hello ")
   local marks = lua([[
-    local ns = vim.api.nvim_get_namespaces().floatcc
+    local ns = vim.api.nvim_get_namespaces()["float-claude"]
     local mark = vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true })[1]
     return { mark[2], mark[3], mark[4].virt_text[1][1], vim.api.nvim_win_get_cursor(0)[2] }
   ]])
@@ -201,7 +201,7 @@ end)
 
 test("returns to Insert mode at the original position when opened from Insert mode", function()
   setup_buffer()
-  lua([[vim.keymap.set("i", "<F2>", function() vim.g.result = nil; require("floatcc.input").open({ on_submit = function(t) vim.g.result = t end }) end)]])
+  lua([[vim.keymap.set("i", "<F2>", function() vim.g.result = nil; require("float-claude.input").open({ on_submit = function(t) vim.g.result = t end }) end)]])
   keys("i<F2>abc<CR>")
   eq({ result = "abc", mode = "i", cursor = { 7, 5 } }, {
     result = state().result,
@@ -220,14 +220,14 @@ test("leaving the popup window cancels and wipes its buffer", function()
 end)
 
 test("highlight groups can be overridden", function()
-  lua([[vim.api.nvim_set_hl(0, "FloatCCNormal", { bg = "#123456" })]])
+  lua([[vim.api.nvim_set_hl(0, "FloatClaudeNormal", { bg = "#123456" })]])
   setup_buffer()
   open()
-  eq(0x123456, lua([[return vim.api.nvim_get_hl(0, { name = "FloatCCNormal" }).bg]]), "bg")
-  eq(0x3fb5c9, lua([[return vim.api.nvim_get_hl(0, { name = "FloatCCPrompt" }).fg]]), "prompt fg")
+  eq(0x123456, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudeNormal" }).bg]]), "bg")
+  eq(0x3fb5c9, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudePrompt" }).fg]]), "prompt fg")
 end)
 
--- floatcc.ask with a stub claudecode.nvim that records what would reach the Claude terminal.
+-- float-claude.ask with a stub claudecode.nvim that records what would reach the Claude terminal.
 local function stub_claudecode()
   lua([[
     vim.g.sent = nil
@@ -244,14 +244,14 @@ local function stub_claudecode()
     vim.api.nvim_buf_set_lines(0, 0, -1, false, { "a", "b", "c", "d", "e" })
     vim.cmd.write()
     vim.g.mapleader = " "
-    require("floatcc").setup()
+    require("float-claude").setup()
   ]])
 end
 
 test("ask from Normal mode sends the prompt with the file attached", function()
   stub_claudecode()
   keys(" ai")
-  eq("floatcc", lua("return vim.bo.filetype"), "popup opened by the default keymap")
+  eq("float-claude", lua("return vim.bo.filetype"), "popup opened by the default keymap")
   keys("summarize<S-CR>in one line<CR>")
   local file = lua("return vim.fn.fnamemodify('sample.lua', ':p')")
   eq("@" .. file .. "\nsummarize\nin one line", lua("return vim.g.sent"), "sent text")

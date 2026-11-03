@@ -6,7 +6,7 @@ local defaults = {
 }
 
 local function notify(msg, level)
-  vim.notify("floatcc: " .. msg, level or vim.log.levels.ERROR)
+  vim.notify("float-claude: " .. msg, level or vim.log.levels.ERROR)
 end
 
 -- "@file#L3-5" on its own first line, then the prompt. The newline also makes
@@ -95,7 +95,7 @@ function M.ask()
   if vim.fn.mode():match("^[vV\22]") then
     vim.cmd("normal! \27")
   end
-  require("floatcc.input").open({
+  require("float-claude.input").open({
     multiline = true,
     on_submit = function(text)
       send(text, context)
@@ -106,7 +106,7 @@ end
 function M.setup(opts)
   opts = vim.tbl_deep_extend("force", defaults, opts or {})
   if opts.keymap then
-    vim.keymap.set({ "n", "x" }, opts.keymap, M.ask, { desc = "floatcc: ask Claude" })
+    vim.keymap.set({ "n", "x" }, opts.keymap, M.ask, { desc = "float-claude: ask Claude" })
   end
 end
 
