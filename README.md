@@ -1,20 +1,17 @@
 # float-claude.nvim
-Neovim: ask Claude Code about the file or selection from a cursor-anchored popup
+Neovim: select code, press a key, and ask Claude in a small popup right under the selection
 
-Press the keymap, type a prompt in a small borderless popup that opens right at the cursor, and press Enter.
-The prompt goes to the Claude Code session that [claudecode.nvim](https://github.com/coder/claudecode.nvim) runs, with context attached:
+Select some lines, press `<leader>ai`, type a prompt in the borderless popup that opens under the selection, and press Enter. Claude decides what the prompt needs:
 
-- **Normal mode**: the current file (as an absolute `@/path/to/file` mention), so "summarize this file" or "refactor this file" work.
-- **Visual mode**: the selected lines (`@/path/to/file#L3-7`), so "refactor this part" works.
+- **Edit**: "use a hash map, one pass". The popup closes and the selected lines are rewritten in place, streaming in line by line with the new lines briefly highlighted. One `u` restores the original.
+- **Answer**: "what's the time complexity?". The answer streams into the popup and you can keep asking follow-ups ("can it be O(n)?"). A follow-up can also ask for an edit of the selection.
 
-Answers show up in the Claude pane. Edits come back through claudecode.nvim's usual diff accept/deny flow (`:ClaudeCodeDiffAccept` / `:ClaudeCodeDiffDeny`).
-If Claude Code is not running yet, float-claude starts it and sends the prompt once it has connected.
+Pure Lua, no plugin dependencies. Replies come from the [Claude Code](https://claude.com/claude-code) CLI running headless in the background (one `claude -p` process per popup, so follow-ups continue the same conversation); no API key and no HTTP code in the plugin.
 
 ## Requirements
 
 - Neovim >= 0.10
-- [coder/claudecode.nvim](https://github.com/coder/claudecode.nvim) from `main` with `:ClaudeCodeSendText` (added after v0.3.0), using its `snacks` or `native` terminal provider.
-  float-claude types the prompt into the Claude terminal inside Neovim, so the `external` and `none` providers are not supported.
+- The `claude` CLI on your `PATH`, logged in (run `claude` once and sign in)
 
 ## Install
 
@@ -23,7 +20,6 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```lua
 {
   "kova1max/float-claude.nvim",
-  dependencies = { "coder/claudecode.nvim" },
   opts = {},
 }
 ```
@@ -32,44 +28,39 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 | Key | Where | Action |
 |---|---|---|
-| `<leader>ai` | Normal, Visual | Open the popup at the cursor |
+| `<leader>ai` | Visual | Ask about the selected lines (any Visual mode; whole lines are used) |
+| `<leader>ai` | Normal | Ask about the current line |
 | `<CR>` | Popup | Send the prompt |
-| `<S-CR>` or `<C-j>` | Popup, Insert mode | New line (use `<C-j>` if your terminal does not send Shift-Enter) |
-| `<Esc>` | Popup, Insert mode | Back to Normal mode |
-| `<Esc>` or `q` | Popup, Normal mode | Cancel |
+| `<S-CR>` or `<C-j>` | Popup | New line in the prompt (use `<C-j>` if your terminal does not send Shift-Enter) |
+| `<C-u>` / `<C-d>`, mouse wheel | Popup | Scroll the conversation |
+| `<Esc>` | Popup, or while an edit streams | Close and cancel the request; a half-written edit is undone |
 
-An empty prompt sends nothing. Claude reads the file from disk, so save unsaved changes first (float-claude warns when the buffer is modified).
-claudecode.nvim's `focus_after_send` decides whether focus moves to the Claude pane after sending.
+The conversation scrolls like a chat: once it no longer fits, each new question moves to the top of the popup and the answer streams in below it, following the newest line. Scroll back and the view stays put while the answer keeps streaming; scroll to the bottom to follow again. The history is read-only. While an answer streams, the cursor sits in the conversation, so Normal-mode motions scroll it too; `<Esc>` or `q` closes.
+
+Claude gets the file name and filetype, the selected lines, and up to 40 lines around them. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
 
 ## Configuration
 
 ```lua
 require("float-claude").setup({
-  keymap = "<leader>ai", -- normal + visual mode; false to skip it and map require("float-claude").ask yourself
+  keymap = "<leader>ai", -- Visual + Normal mode; false to skip it and map require("float-claude").ask yourself
+  cmd = { "claude" }, -- the CLI, with extra arguments if you like, e.g. { "claude", "--model", "sonnet" }
 })
 ```
 
-The popup colors come from two highlight groups, defined with `default = true` so a colorscheme or your config can override them:
+Colors come from highlight groups defined with `default = true`, so a colorscheme or your config can override them:
 
-| Group | Default |
-|---|---|
-| `FloatClaudeNormal` | `fg = #e6e6e6, bg = #1c1c1f` (popup and typed text) |
-| `FloatClaudePrompt` | `fg = #3fb5c9, bg = #1c1c1f` (the `❯`) |
-
-The popup alone is plain Lua with no dependencies:
-
-```lua
-require("float-claude.input").open({
-  default = "",       -- initial text, may contain "\n" when multiline
-  multiline = false,  -- true: Shift-Enter / Ctrl-J add lines; Enter always submits
-  on_submit = function(text) end, -- the typed lines joined with "\n"
-  on_cancel = function() end,     -- optional
-})
-```
+| Group | Default | Used for |
+|---|---|---|
+| `FloatClaudeNormal` | `fg = #e6e6e6, bg = #1c1c1f` | popup, typed text, answers |
+| `FloatClaudePrompt` | `fg = #3fb5c9` | the `❯` |
+| `FloatClaudeHistory` | `fg = #8a8a8a` | sent questions, spinners, `refactoring…` |
+| `FloatClaudeSelection` | links to `Visual` | the selection while the popup or an edit is active |
+| `FloatClaudeAdded` | `bg = #12301f` | freshly written lines |
 
 ## Development
 
-Run the tests (headless, no network, no plugins needed):
+Run the tests (headless; a fake CLI stands in for Claude, so no network or account is needed):
 
 ```sh
 nvim --clean --headless -l tests/run.lua
