@@ -4,8 +4,8 @@ Neovim: ask Claude Code about the file or selection from a cursor-anchored popup
 Press the keymap, type a prompt in a small borderless popup that opens right at the cursor, and press Enter.
 The prompt goes to the Claude Code session that [claudecode.nvim](https://github.com/coder/claudecode.nvim) runs, with context attached:
 
-- **Normal mode**: the current file, so "summarize this file" or "refactor this file" work.
-- **Visual mode**: the selected lines (`@file#L3-7`), so "refactor this part" works.
+- **Normal mode**: the current file (as an absolute `@/path/to/file` mention), so "summarize this file" or "refactor this file" work.
+- **Visual mode**: the selected lines (`@/path/to/file#L3-7`), so "refactor this part" works.
 
 Answers show up in the Claude pane. Edits come back through claudecode.nvim's usual diff accept/deny flow (`:ClaudeCodeDiffAccept` / `:ClaudeCodeDiffDeny`).
 If Claude Code is not running yet, floatcc starts it and sends the prompt once it has connected.

@@ -144,6 +144,9 @@ function M.open(opts)
         if vim.fn.line("w0") > topline then
           vim.fn.winrestview({ topline = topline })
         end
+        if config.width < MAX_WIDTH and vim.fn.winsaveview().leftcol > 0 then
+          vim.fn.winrestview({ leftcol = 0 })
+        end
       end)
     end,
   })

@@ -129,6 +129,15 @@ test("width grows with the longest line, from 26 up to 60 cells", function()
   eq(60, popup().width, "width after 100 chars")
 end)
 
+test("growing width keeps the typed text in the cursor column", function()
+  setup_buffer()
+  open({ multiline = true })
+  for _, key in ipairs({ string.rep("x", 30), "<C-j>", string.rep("y", 40) }) do
+    keys(key)
+    eq(0, lua("return vim.fn.winsaveview().leftcol"), "horizontal scroll after " .. key)
+  end
+end)
+
 test("multiline: Shift-Enter and Ctrl-J add lines, Enter submits", function()
   setup_buffer()
   open({ multiline = true })
@@ -236,7 +245,8 @@ test("ask from Normal mode sends the prompt with the file attached", function()
   keys(" ai")
   eq("floatcc", lua("return vim.bo.filetype"), "popup opened by the default keymap")
   keys("summarize<S-CR>in one line<CR>")
-  eq("@sample.lua\nsummarize\nin one line", lua("return vim.g.sent"), "sent text")
+  local file = lua("return vim.fn.fnamemodify('sample.lua', ':p')")
+  eq("@" .. file .. "\nsummarize\nin one line", lua("return vim.g.sent"), "sent text")
 end)
 
 test("ask from Visual mode sends the selected line range", function()
@@ -244,13 +254,35 @@ test("ask from Visual mode sends the selected line range", function()
   keys("4GVk ai")
   eq("i", lua("return vim.fn.mode()"), "popup open in Insert mode")
   keys("refactor this<CR>")
-  eq("@sample.lua#L3-4\nrefactor this", lua("return vim.g.sent"), "sent text")
+  local file = lua("return vim.fn.fnamemodify('sample.lua', ':p')")
+  eq("@" .. file .. "#L3-4\nrefactor this", lua("return vim.g.sent"), "sent text")
 end)
 
 test("ask sends nothing for an empty prompt", function()
   stub_claudecode()
   keys(" ai<CR>")
   eq(vim.NIL, lua("return vim.g.sent"), "sent text")
+end)
+
+test("auto-start waits for the new terminal to connect even if another client is connected", function()
+  stub_claudecode()
+  lua([[
+    local claudecode = package.loaded["claudecode"]
+    local terminal = package.loaded["claudecode.terminal"]
+    vim.g.clients = 1
+    claudecode.state.config.connection_timeout = 5000
+    claudecode.state.config.connection_wait_delay = 0
+    claudecode.state.server = { get_status = function() return { client_count = vim.g.clients } end }
+    claudecode.is_claude_connected = function() return vim.g.clients > 0 end
+    local active = false
+    terminal.get_active_terminal_bufnr = function() return active and 1 or nil end
+    terminal.ensure_visible = function() active = true end
+  ]])
+  keys(" aiexplain<CR>")
+  lua("vim.wait(300)")
+  eq(vim.NIL, lua("return vim.g.sent"), "nothing sent before the new terminal connects")
+  lua("vim.g.clients = 2")
+  eq(true, lua("return vim.wait(1000, function() return vim.g.sent ~= nil end)"), "sent after it connects")
 end)
 
 if failures > 0 then

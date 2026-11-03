@@ -16,7 +16,7 @@ local function message(prompt, context)
   if not context then
     return prompt
   end
-  local mention = "@" .. vim.fn.fnamemodify(context.file, ":.")
+  local mention = "@" .. vim.fn.fnamemodify(context.file, ":p")
   if context.first_line then
     mention = string.format("%s#L%d-%d", mention, context.first_line, context.last_line)
   end
@@ -69,13 +69,14 @@ local function send(prompt, context)
   if not claudecode.state.server and not claudecode.start(false) then
     return
   end
+  local clients = claudecode.state.server.get_status().client_count
   local win = vim.api.nvim_get_current_win()
   terminal.ensure_visible()
   -- The snacks provider focuses a newly started terminal even when asked not to.
   vim.api.nvim_set_current_win(win)
   local deadline = vim.uv.now() + claudecode.state.config.connection_timeout
   local function wait()
-    if claudecode.is_claude_connected() then
+    if claudecode.state.server.get_status().client_count > clients then
       -- Give the freshly started prompt a moment to accept input.
       vim.defer_fn(deliver, claudecode.state.config.connection_wait_delay)
     elseif vim.uv.now() < deadline and terminal.get_active_terminal_bufnr() then
