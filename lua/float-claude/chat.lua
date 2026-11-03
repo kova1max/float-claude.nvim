@@ -28,6 +28,7 @@ end
 
 -- Word-wrap `text` to `width` display cells; words longer than a line are split.
 local function wrap(text, width)
+  width = math.max(width, 1)
   local out = {}
   for _, para in ipairs(vim.split(text, "\n", { plain = true })) do
     local line = ""
@@ -39,7 +40,7 @@ local function wrap(text, width)
         end
         local n = vim.fn.strchars(word)
         local cut = n
-        while width_of(vim.fn.strcharpart(word, 0, cut)) > width do
+        while cut > 1 and width_of(vim.fn.strcharpart(word, 0, cut)) > width do
           cut = cut - 1
         end
         table.insert(out, vim.fn.strcharpart(word, 0, cut))
@@ -377,6 +378,9 @@ function M.open(opts)
   end
 
   local function start_edit(code)
+    if not vim.bo[s.buf].modifiable then
+      return fail("the buffer is not modifiable")
+    end
     close_windows()
     restore_focus()
     editing = edit.start({

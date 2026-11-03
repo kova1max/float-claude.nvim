@@ -39,6 +39,8 @@ The conversation scrolls like a chat: once it no longer fits, each new question 
 
 Claude gets the file name and filetype, the selected lines, and up to 40 lines around them. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
 
+Because no settings files are loaded, your Claude Code hooks, `CLAUDE.md` files and `settings.json` are not used. Auth must come from your normal `claude` login or from environment variables such as `ANTHROPIC_API_KEY` or `CLAUDE_CODE_USE_BEDROCK` set in the shell Neovim runs in; provider settings or an `apiKeyHelper` in `settings.json` are not read.
+
 ## Configuration
 
 ```lua

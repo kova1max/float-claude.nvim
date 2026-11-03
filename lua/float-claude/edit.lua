@@ -9,13 +9,13 @@ local ns = vim.api.nvim_create_namespace("float-claude-edit")
 local SPINNER = { "◐", "◓", "◑", "◒" }
 
 ---@param opts { buf: integer, win: integer, first: integer, last: integer, on_end: fun() }
+---  `buf` must be modifiable.
 ---  `first`/`last` are the 1-based selected lines; `on_end` runs once the edit is over.
 function M.start(opts)
   local buf, first = opts.buf, opts.first
   local old_count = opts.last - first + 1
   local written, partial, frame = 0, "", 1
   local writing, ended = false, false
-  local was_modifiable = vim.bo[buf].modifiable
   local spinner_mark
   local timer = assert(vim.uv.new_timer())
   local self = {}
@@ -35,7 +35,7 @@ function M.start(opts)
     timer:stop()
     timer:close()
     if vim.api.nvim_buf_is_valid(buf) then
-      vim.bo[buf].modifiable = was_modifiable
+      vim.bo[buf].modifiable = true
       pcall(vim.keymap.del, "n", "<Esc>", { buffer = buf })
       if spinner_mark then
         vim.api.nvim_buf_del_extmark(buf, ns, spinner_mark)
