@@ -337,6 +337,32 @@ test("a follow-up can edit the original selection", function()
   eq(1, #lua("return vim.api.nvim_list_wins()"), "popup closed")
 end)
 
+test("answer: the tag may share its line with the answer, split across deltas", function()
+  setup({ { "ANS", "WER It loops", " twice.\nThen", " stops." }, "ANSWER Yes." })
+  ask()
+  keys("explain<CR>")
+  wait("return answered(1)", "the first answer")
+  keys("sure?<CR>")
+  wait("return answered(2)", "the second answer")
+  eq({
+    " ❯ explain",
+    "   It loops twice.",
+    "   Then stops.",
+    "",
+    " ❯ sure?",
+    "   Yes.",
+    "",
+  }, floats()["float-claude-transcript"].lines)
+end)
+
+test("edit: the tag may share its line with the code", function()
+  setup({ { "EDIT", " local n = #nums\n" } })
+  ask()
+  keys("simplify<CR>")
+  wait("return vim.fn.execute('1messages'):find('refactored') ~= nil", "the edit")
+  eq({ "function f(nums)", "local n = #nums", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 3, false)"))
+end)
+
 test("chat scrolls like a chat: question to the top, follows, scroll-back is kept", function()
   local long = {}
   for i = 1, 40 do

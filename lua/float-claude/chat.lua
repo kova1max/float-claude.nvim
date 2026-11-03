@@ -84,6 +84,33 @@ local function first_message(s, prompt)
   }, "\n")
 end
 
+-- Splits a reply into its EDIT/ANSWER tag and the rest. The tag is the first
+-- word; the rest may start on the same line. Returns nil while the reply is
+-- too short to tell, unless `final`. An untagged reply is an answer.
+local function parse_tag(reply, final)
+  local s = reply:gsub("^%s+", "")
+  local word = s:match("^%a*")
+  local tag = word:upper()
+  if #word == #s and not final then
+    if ("EDIT"):sub(1, #tag) == tag or ("ANSWER"):sub(1, #tag) == tag then
+      return nil
+    end
+    return "ANSWER", reply
+  end
+  if tag ~= "EDIT" and tag ~= "ANSWER" then
+    return "ANSWER", reply
+  end
+  local after = s:sub(#word + 1)
+  if after:match("^:?[ \t]*$") and not final then
+    return nil
+  end
+  local rest, n = after:gsub("^:?[ \t]*\n", "", 1)
+  if n == 0 then
+    rest = after:gsub("^:?[ \t]?", "", 1)
+  end
+  return tag, rest
+end
+
 -- Transcript window keys: it is read-only; <Esc>/q close, i/a/<CR> go back to the input.
 local function transcript_keymaps(s, close)
   local function to_input()
@@ -396,7 +423,7 @@ function M.open(opts)
     editing.feed(code)
   end
 
-  -- The reply's first line says which flow runs: EDIT or ANSWER.
+  -- The reply's first word says which flow runs: EDIT or ANSWER.
   local reply, tag = "", nil
   local function on_delta(text)
     if editing then
@@ -408,15 +435,13 @@ function M.open(opts)
     local ex = s.exchanges[#s.exchanges]
     if not tag then
       reply = reply .. text
-      local head, rest = reply:match("^%s*([^\n]*)\n(.*)$")
-      if not head then
+      local rest
+      tag, rest = parse_tag(reply, false)
+      if not tag then
         return
       end
-      tag = vim.trim(head):upper()
       if tag == "EDIT" then
         return start_edit(rest)
-      elseif tag ~= "ANSWER" then
-        tag, rest = "ANSWER", reply -- untagged reply: show all of it
       end
       ex.a = rest
     else
@@ -436,12 +461,13 @@ function M.open(opts)
       return
     end
     local ex = s.exchanges[#s.exchanges]
-    if not tag then -- one-line reply without a newline
-      local head = vim.trim(reply)
-      if head:upper() == "EDIT" then
-        return start_edit("")
+    if not tag then -- short reply, still undecided
+      local rest
+      tag, rest = parse_tag(reply, true)
+      if tag == "EDIT" then
+        return start_edit(rest)
       end
-      ex.a = head:upper() == "ANSWER" and "" or head
+      ex.a = rest
     end
     ex.a = vim.trim(ex.a)
     ex.done = true

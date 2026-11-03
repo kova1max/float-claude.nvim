@@ -1,6 +1,7 @@
 -- Stand-in for `claude -p --input-format stream-json --output-format stream-json`.
 -- Run with `nvim -l`. For each user message read from stdin it streams the next
 -- reply from $FAKE_CLAUDE_REPLIES (a JSON list) as text deltas, then a result.
+-- A reply is a string streamed one line per delta, or a list of the deltas.
 -- A reply "!error <msg>" ends the turn with an error result; "!exit <msg>" prints
 -- <msg> to stderr and exits 1. Received messages are appended to $FAKE_CLAUDE_LOG.
 local replies = vim.json.decode(os.getenv("FAKE_CLAUDE_REPLIES"))
@@ -20,13 +21,18 @@ for line in io.stdin:lines() do
   log:write(line, "\n")
   log:flush()
   local reply = replies[turn] or ""
+  local deltas = type(reply) == "table" and reply or nil
+  if deltas then
+    reply = table.concat(deltas)
+  end
   if reply:match("^!exit ") then
     io.stderr:write(reply:sub(7), "\n")
     os.exit(1)
   elseif reply:match("^!error ") then
     emit({ type = "result", subtype = "error_during_execution", is_error = true, result = reply:sub(8) })
   else
-    for chunk in reply:gmatch("[^\n]*\n?") do
+    deltas = deltas or vim.iter(reply:gmatch("[^\n]*\n?")):totable()
+    for _, chunk in ipairs(deltas) do
       if chunk ~= "" then
         emit({ type = "stream_event", event = { type = "content_block_delta", delta = { type = "text_delta", text = chunk } } })
         vim.uv.sleep(delay)
