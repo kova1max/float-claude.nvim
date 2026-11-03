@@ -37,7 +37,7 @@ local function win_config(buf, row, col)
   local height = math.min(#lines, MAX_HEIGHT)
   local bottom = vim.o.lines - vim.o.cmdheight - (vim.o.laststatus == 0 and 0 or 1)
   local top = row + 1 + height <= bottom and row + 1 or row - height
-  return { relative = "editor", row = top, col = col - PREFIX_WIDTH, width = width, height = height }
+  return { relative = "editor", row = top, col = col - PREFIX_WIDTH, width = width, height = height }, longest
 end
 
 ---@class floatcc.InputOpts
@@ -135,7 +135,7 @@ function M.open(opts)
     buffer = buf,
     callback = function()
       draw_prefix(buf)
-      local config = win_config(buf, row, col)
+      local config, longest = win_config(buf, row, col)
       vim.api.nvim_win_set_config(win, config)
       -- A new line scrolls the still-short window before it grows; scroll back so
       -- no line is hidden above while filler rows show below.
@@ -144,7 +144,7 @@ function M.open(opts)
         if vim.fn.line("w0") > topline then
           vim.fn.winrestview({ topline = topline })
         end
-        if config.width < MAX_WIDTH and vim.fn.winsaveview().leftcol > 0 then
+        if longest + PREFIX_WIDTH + 1 <= config.width and vim.fn.winsaveview().leftcol > 0 then
           vim.fn.winrestview({ leftcol = 0 })
         end
       end)

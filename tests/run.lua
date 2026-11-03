@@ -132,7 +132,7 @@ end)
 test("growing width keeps the typed text in the cursor column", function()
   setup_buffer()
   open({ multiline = true })
-  for _, key in ipairs({ string.rep("x", 30), "<C-j>", string.rep("y", 40) }) do
+  for _, key in ipairs({ string.rep("x", 30), "<C-j>", string.rep("y", 40), string.rep("y", 16) }) do
     keys(key)
     eq(0, lua("return vim.fn.winsaveview().leftcol"), "horizontal scroll after " .. key)
   end
