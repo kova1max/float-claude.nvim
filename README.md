@@ -109,7 +109,7 @@ opts = {
 }
 ```
 
-A project can add its own: a `.float-claude.md` file in the file's directory or any directory above it (the nearest one wins) is added after `prompt`. Set `project_prompt = false` to ignore such files, or to another file name to use that. Note that a cloned repository can bring one: it can steer the replies and edits you get in that project (Claude still has no tools there, and edits show in the buffer, one `u` away, or as a diff with `review_edits`).
+A project can add its own too, once you opt in: with `project_prompt = ".float-claude.md"` (or another file name), that file in the file's directory or any directory above it (the nearest one wins) is added after `prompt`. It is off by default because a cloned repository can bring such a file: it can steer the replies and edits you get in that project (Claude still has no tools there, and edits show in the buffer, one `u` away, or as a diff with `review_edits`).
 
 Both come after the built-in instructions, and the reply format (an edit or an answer) always wins over them.
 
@@ -152,7 +152,7 @@ Every option, with its default (`opts` for lazy.nvim, or `require("float-claude"
   keymap = "<leader>ai", -- Visual + Normal mode: ask about the selection / back to the popup; false to map require("float-claude").ask yourself
   cmd = { "claude" }, -- the CLI, with extra arguments if you like, e.g. { "claude", "--model", "sonnet" }
   prompt = false, -- your instructions for every chat: a string, or function(ctx) returning one (see above)
-  project_prompt = ".float-claude.md", -- file added from the file's directory or above; false to ignore
+  project_prompt = false, -- e.g. ".float-claude.md": that file, from the file's directory or above, is added
   context_lines = 40, -- unselected lines sent above and below the selection
   width = 50, -- popup width in columns, capped to the screen; longer lines wrap
   max_height = false, -- popup height cap in rows; false: as tall as the screen allows

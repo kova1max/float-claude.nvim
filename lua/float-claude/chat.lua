@@ -955,14 +955,17 @@ function M.open(opts)
     end
   end
   if opts.close_on_leave then
-    -- Leaving it other than with the unfocus key or a jump (leave()) closes it.
+    -- Leaving it other than with the unfocus key or a jump (leave()) closes it;
+    -- its hover window counts as part of it.
+    local function inside(win)
+      return win == s.iwin or win == s.twin or vim.w[win]["float-claude-hover"] ~= nil
+    end
     vim.api.nvim_create_autocmd("WinLeave", {
       group = group,
       callback = function()
-        local win = vim.api.nvim_get_current_win()
-        if not s.keep and (win == s.iwin or win == s.twin) then
+        if not s.keep and inside(vim.api.nvim_get_current_win()) then
           vim.schedule(function()
-            if not closed and not s.hidden and not focused() then
+            if not closed and not s.hidden and not inside(vim.api.nvim_get_current_win()) then
               close()
             end
           end)

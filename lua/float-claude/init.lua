@@ -9,8 +9,9 @@ local config = {
   -- Your own instructions for Claude, added to the built-in ones in every chat:
   -- a string, or a function(ctx) returning one (ctx: buf, file, filetype).
   prompt = false,
-  -- A file whose text is added too, found in the file's directory or above it. `false` disables it.
-  project_prompt = ".float-claude.md",
+  -- A file whose text is added too, found in the file's directory or above it,
+  -- e.g. ".float-claude.md". Off by default: a cloned repository could steer Claude.
+  project_prompt = false,
   -- Unselected lines sent above and below the selection.
   context_lines = 40,
   -- Popup width in columns (capped to the screen). Longer lines wrap onto more rows.

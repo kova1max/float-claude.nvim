@@ -1281,15 +1281,19 @@ local function system_prompt(log)
   end
 end
 
-test("custom prompt: the prompt option and the project's .float-claude.md reach Claude", function()
+test("custom prompt: the prompt option and, opted in, the project's .float-claude.md reach Claude", function()
   local log = setup()
-  lua([[require("float-claude").setup({ prompt = function(ctx)
-    return "Reply in " .. ctx.filetype .. " style."
-  end })]])
   local dir = vim.fn.tempname()
   vim.fn.mkdir(dir .. "/src", "p")
   vim.fn.writefile({ "Prefer early returns.", "" }, dir .. "/.float-claude.md")
   lua("vim.api.nvim_buf_set_name(0, ...)", dir .. "/src/demo.lua")
+  ask()
+  eq(lua("return require('float-claude.claude').system_prompt"), system_prompt(log), "by default the file is not used")
+  keys("<Esc>q")
+  log = setup()
+  lua([[require("float-claude").setup({ project_prompt = ".float-claude.md", prompt = function(ctx)
+    return "Reply in " .. ctx.filetype .. " style."
+  end })]])
   ask()
   local text = system_prompt(log)
   assert(vim.startswith(text, lua("return require('float-claude.claude').system_prompt")), "built-in rules first")
@@ -1355,6 +1359,30 @@ test("close_after_edit closes once the edit is applied; close_on_leave closes wh
   eq(3, #lua("return vim.api.nvim_list_wins()"), "the unfocus key keeps it")
   keys(" ai<C-\\><C-n><C-w>p")
   wait("return #vim.api.nvim_list_wins() == 1", "the popup to close")
+end)
+
+test("close_on_leave: focusing the hover window (K twice) keeps the popup", function()
+  setup({ CODE_ANSWER }, 0, { close_on_leave = true })
+  fake_lsp({ nums = { 0, 11 } }, {})
+  ask()
+  keys("explain<CR>")
+  wait("return answered(1)", "the answer")
+  keys("<C-\\><C-n><C-w>w")
+  lua("vim.api.nvim_win_set_cursor(0, { 4, 15 })") -- on nums
+  wait([[return vim.iter(vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, { details = true })):any(function(m)
+    return m[4].hl_group == "FloatClaudeLink" and m[2] == 3
+  end)]], "nums to be underlined")
+  keys("K")
+  wait([[return vim.iter(vim.api.nvim_list_wins()):any(function(w)
+    return vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(w), 0, -1, false)[1] == "hover: nums"
+  end)]], "the hover window")
+  keys("K")
+  eq({ "hover: nums" }, lua("return vim.api.nvim_buf_get_lines(0, 0, 1, false)"), "the hover window has focus")
+  lua("vim.wait(50)")
+  assert(floats()["float-claude-transcript"], "the popup stays")
+  keys("<C-w>p")
+  lua("vim.wait(50)")
+  assert(floats()["float-claude-transcript"], "back in the popup, it stays")
 end)
 
 if failures > 0 then
