@@ -1476,7 +1476,8 @@ test("actions: in the popup while a reply streams, an action leaves the prompt a
 end)
 
 test("actions: one with filetypes is mapped and offered only in those buffers", function()
-  local log = setup({ "ANSWER\nok" }, 0, { actions = { todo = { key = "<leader>ao", prompt = "List the TODOs.", filetypes = { "markdown" } } } })
+  local log = setup({ "ANSWER\nok", "ANSWER\nnone left" }, 0,
+    { actions = { todo = { key = "<leader>ao", prompt = "List the TODOs.", filetypes = { "markdown" } } } })
   pick("nothing")
   keys(":FloatClaude<CR>")
   eq({ false, "", "" }, { vim.tbl_contains(lua("return listed"), "todo        <leader>ao"),
@@ -1491,6 +1492,14 @@ test("actions: one with filetypes is mapped and offered only in those buffers", 
   wait("return answered(1)", "the answer")
   local msg = sent(log)[2]
   assert(msg:find("(filetype: markdown)", 1, true) and vim.endswith(msg, "Request: List the TODOs."), msg)
+  keys("<Esc> ao") -- in the popup: a follow-up
+  wait("return answered(2)", "the follow-up")
+  assert(vim.endswith(sent(log)[3], "Request: List the TODOs."), sent(log)[3])
+  keys("<Esc>q")
+  lua("vim.cmd.buffer(1)")
+  keys(" ai")
+  eq({ "float-claude", "" }, { lua("return vim.bo.filetype"), lua([[return vim.fn.maparg(" ao", "n")]]) },
+    "not in the popup of a lua chat")
 end)
 
 test("actions: setup changes a key, adds an action and removes one (false)", function()

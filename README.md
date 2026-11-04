@@ -101,7 +101,7 @@ opts = {
 }
 ```
 
-An action is `{ key, prompt }` (`key = false`: no mapping, still in `:FloatClaude`), plus `prose = true` to offer it for prose and comments instead of code, or `filetypes = { ... }` to offer it only in those filetypes: its key is then mapped only in buffers of those filetypes, and `:FloatClaude` lists it only there.
+An action is `{ key, prompt }` (`key = false`: no mapping, still in `:FloatClaude`), plus `prose = true` to offer it for prose and comments instead of code, or `filetypes = { ... }` to offer it only in those filetypes: its key is then mapped only in buffers of those filetypes (and in the popup of a chat about one), and `:FloatClaude` lists it only there.
 
 `:FloatClaude` lists the actions offered for the current buffer with their keys, plus opening the popup (or going back to the open one), hiding it, and switching its theme, through `vim.ui.select` (so a picker plugin that replaces it, like telescope or snacks, shows it). From Visual mode (`:'<,'>FloatClaude`) the pick works on the selection; otherwise it does what its key does in Normal mode.
 

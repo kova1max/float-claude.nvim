@@ -338,6 +338,7 @@ function M.open(opts)
   local function scratch(ft)
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = "wipe"
+    vim.b[buf].float_claude_source = s.buf
     vim.bo[buf].filetype = ft
     return buf
   end

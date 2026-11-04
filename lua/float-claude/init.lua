@@ -238,16 +238,23 @@ function M.setup(opts)
         end, { buffer = buf, desc = "float-claude: " .. name })
       end
       if action.filetypes then
-        -- Mapped only in buffers of those filetypes, open ones and later ones.
+        -- Mapped only in buffers of those filetypes, open ones and later ones,
+        -- and in a popup whose conversation is about one.
+        local function offered(buf)
+          local source = vim.b[buf].float_claude_source or buf
+          return vim.api.nvim_buf_is_valid(source) and vim.tbl_contains(action.filetypes, vim.bo[source].filetype)
+        end
         vim.api.nvim_create_autocmd("FileType", {
           group = group,
-          pattern = action.filetypes,
+          pattern = vim.list_extend({ "float-claude", "float-claude-transcript" }, action.filetypes),
           callback = function(ev)
-            map(ev.buf)
+            if offered(ev.buf) then
+              map(ev.buf)
+            end
           end,
         })
         for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-          if vim.api.nvim_buf_is_loaded(buf) and vim.tbl_contains(action.filetypes, vim.bo[buf].filetype) then
+          if vim.api.nvim_buf_is_loaded(buf) and offered(buf) then
             map(buf)
           end
         end
