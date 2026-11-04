@@ -50,6 +50,8 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `<C-o>` | Popup | Back to the code; the popup stays on screen |
 | `<leader>yy` / `<leader>nn` | Popup, with `review_edits` | Accept / discard the edit shown as a diff |
 | `<CR>` or a click / `K` | Conversation, on an underlined name | Jump to its definition in the code window / show its hover (see below) |
+| `<leader>ae`, `<leader>af`, ... | Normal, Visual, popup | One-key actions: send a ready-made prompt (see [Actions](#actions)) |
+| `:FloatClaude` | Normal, Visual | Pick an action, open or hide the popup, or switch its theme from a list |
 
 Every key above is a setup option (see [Configuration](#configuration)).
 
@@ -65,6 +67,43 @@ The popup does not have to be in the way, and does not have to go away:
 - `<C-o>` (or leaving it any other way: another window, a split, another file) puts you back in the code with the popup still on screen, on top of whatever is shown there. It stays where it opened (top-right, or at the cursor it opened at) and answers keep streaming into it.
 
 `<leader>ai` in Normal mode brings you back into it, showing it first if hidden, with the same conversation and scroll position. A new Visual selection with `<leader>ai` starts a fresh chat in its place. `q` in the popup (Normal mode; `<Esc>` first if you are typing) or `:q` in it closes it and ends the conversation. Prefer the popup to go away on its own? See `close_after_edit` and `close_on_leave` below. Files never open inside the popup; `:e` there is refused.
+
+### Actions
+
+One key sends a ready-made prompt: the popup opens and the prompt goes out right away, as if you had typed it.
+
+| Key | Action | Prompt |
+|---|---|---|
+| `<leader>ae` | explain | Explain what this code does. |
+| `<leader>af` | fix | Fix the problems the diagnostics report in this code; with none listed, fix the bugs you find. |
+| `<leader>at` | tests | Write unit tests for this code, ... as an answer with a code block; do not edit the code. |
+| `<leader>ay` | types | Add type annotations to this code, ... Change nothing else. |
+| `<leader>ad` | docstring | Add a doc comment to each function in this code, ... Change nothing else. |
+| `<leader>as` | simplify | Simplify this code without changing what it does. |
+| `<leader>ar` | reword | Reword this text so it reads clearly; keep its meaning and tone. (prose) |
+| `<leader>ah` | shorten | Shorten this text; keep its meaning. (prose) |
+| `<leader>ag` | grammar | Fix the spelling, grammar and punctuation of this text. Change nothing else. (prose) |
+
+In Visual mode an action works on the selected lines. In Normal mode it picks the lines for you and highlights them, so you see what Claude got: for a code action, the function around the cursor (found with treesitter; without a parser, or outside a function, the current line); for a prose action, the paragraph around the cursor in a prose buffer, or the block of comment lines around it in code. In the popup an action is a follow-up about the same lines, and outside it an action always starts a fresh chat in place of an open one.
+
+Prose works like code: the reply is an answer, or an edit that replaces the text in place (one `u`, or a diff with `review_edits`). Buffers whose filetype is in `prose_filetypes` (Markdown, commit messages, plain text) offer the prose actions instead of the code ones; in code, the prose actions work on comments (a selection of comment lines only). An action where it is not offered says so and does nothing.
+
+Change an action's key or prompt, remove one, or add your own in `actions`; each action is merged on its own, so you only give what changes:
+
+```lua
+opts = {
+  actions = {
+    explain = { key = "<leader>aE" }, -- another key, same prompt
+    simplify = false, -- no simplify action
+    todo = { key = "<leader>ao", prompt = "List the TODOs in this code." },
+    commit = { key = "<leader>ac", prompt = "Write a commit message for this diff.", filetypes = { "gitcommit" } },
+  },
+}
+```
+
+An action is `{ key, prompt }` (`key = false`: no mapping, still in `:FloatClaude`), plus `prose = true` to offer it for prose and comments instead of code, or `filetypes = { ... }` to offer it only in those filetypes.
+
+`:FloatClaude` lists the actions offered for the current buffer with their keys, plus opening the popup (or going back to the open one), hiding it, and switching its theme, through `vim.ui.select` (so a picker plugin that replaces it, like telescope or snacks, shows it). From Visual mode (`:'<,'>FloatClaude`) the pick works on the selection; otherwise it does what its key does in Normal mode.
 
 ### Code in answers
 
@@ -83,7 +122,7 @@ The popup stays open either way, so you can keep asking. Hiding or leaving the p
 
 ### What Claude sees
 
-Claude gets the file name and filetype, the selected lines, and up to 40 lines around them (`context_lines`). Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
+Claude gets the file name and filetype, the selected lines, up to 40 lines around them (`context_lines`), and the diagnostics in the selected lines (errors, warnings, ... from LSP or a linter, with their line, severity, message and source; `diagnostics = false` leaves them out). Each follow-up sends the diagnostics as they are then, so after an edit Claude sees whether the errors went away. Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
 
 Claude also remembers what it changed. Each follow-up starts with a short record of what happened since its last reply, as diffs rather than copies of the code:
 
@@ -145,7 +184,7 @@ The popup's colors are the highlight groups `FloatClaudeNormal`, `FloatClaudePro
 
 ## Configuration
 
-Every option, with its default (`opts` for lazy.nvim, or `require("float-claude").setup({...})`). Any key can be `false` to leave it unmapped. A table option (like `cursor_offset`) is replaced as a whole, so give all of its fields.
+Every option, with its default (`opts` for lazy.nvim, or `require("float-claude").setup({...})`). Any key can be `false` to leave it unmapped. A table option (like `cursor_offset`) is replaced as a whole, so give all of its fields; `actions` is the exception, merged action by action.
 
 ```lua
 {
@@ -154,6 +193,19 @@ Every option, with its default (`opts` for lazy.nvim, or `require("float-claude"
   prompt = false, -- your instructions for every chat: a string, or function(ctx) returning one (see above)
   project_prompt = false, -- e.g. ".float-claude.md": that file, from the file's directory or above, is added
   context_lines = 40, -- unselected lines sent above and below the selection
+  diagnostics = true, -- send the diagnostics in the selected lines too
+  actions = { -- one-key actions, see Actions; each is merged on its own, false removes one
+    explain = { key = "<leader>ae", prompt = "Explain what this code does." },
+    fix = { key = "<leader>af", prompt = "Fix the problems the diagnostics report in this code; with none listed, fix the bugs you find." },
+    tests = { key = "<leader>at", prompt = "Write unit tests for this code, in the project's test style, as an answer with a code block; do not edit the code." },
+    types = { key = "<leader>ay", prompt = "Add type annotations to this code, in the language's usual way. Change nothing else." },
+    docstring = { key = "<leader>ad", prompt = "Add a doc comment to each function in this code, in the language's usual style. Change nothing else." },
+    simplify = { key = "<leader>as", prompt = "Simplify this code without changing what it does." },
+    reword = { key = "<leader>ar", prompt = "Reword this text so it reads clearly; keep its meaning and tone.", prose = true },
+    shorten = { key = "<leader>ah", prompt = "Shorten this text; keep its meaning.", prose = true },
+    grammar = { key = "<leader>ag", prompt = "Fix the spelling, grammar and punctuation of this text. Change nothing else.", prose = true },
+  },
+  prose_filetypes = { "markdown", "gitcommit", "text" }, -- buffers offering the prose actions instead of the code ones
   width = 50, -- popup width in columns, capped to the screen; longer lines wrap
   max_height = false, -- popup height cap in rows; false: as tall as the screen allows
   placement = "top-right", -- or "cursor": next to the cursor

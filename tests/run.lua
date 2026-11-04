@@ -1385,6 +1385,157 @@ test("close_on_leave: focusing the hover window (K twice) keeps the popup", func
   assert(floats()["float-claude-transcript"], "back in the popup, it stays")
 end)
 
+local DIAGNOSTICS = [[
+  _G.dns = vim.api.nvim_create_namespace("test-diagnostics")
+  vim.diagnostic.set(dns, 1, {
+    { lnum = 3, col = 6, message = "undefined global\nprint", severity = vim.diagnostic.severity.WARN, source = "lua_ls" },
+    { lnum = 1, col = 2, message = "unused loop variable", severity = vim.diagnostic.severity.ERROR },
+    { lnum = 20, col = 0, message = "far away", severity = vim.diagnostic.severity.ERROR },
+  })
+]]
+
+test("diagnostics in the selected lines are sent, as they are at each message; diagnostics = false leaves them out", function()
+  local log = setup({ "ANSWER\nok", "ANSWER\nok" })
+  lua(DIAGNOSTICS)
+  ask()
+  keys("fix<CR>")
+  wait("return answered(1)", "the answer")
+  local msg = sent(log)[2]
+  assert(msg:find("</selection>\nDiagnostics in the selected lines:\n- line 2: error: unused loop variable\n"
+    .. "- line 4: warning: undefined global print (lua_ls)\nRequest: fix", 1, true), msg)
+  lua("vim.diagnostic.reset(dns, 1)")
+  keys("again<CR>")
+  wait("return answered(2)", "the second answer")
+  msg = sent(log)[3]
+  assert(msg:find("</selection>\nDiagnostics in the selected lines: none now.\nRequest: again", 1, true), msg)
+  keys("<Esc>q")
+  log = setup({ "ANSWER\nok" }, 0, { diagnostics = false })
+  lua(DIAGNOSTICS)
+  ask()
+  keys("fix<CR>")
+  wait("return answered(1)", "the answer")
+  msg = sent(log)[2]
+  assert(not msg:find("Diagnostics", 1, true), msg)
+end)
+
+-- vim.ui.select stand-in: records the labels in _G.listed and picks the first
+-- item whose label starts with `label` (none: cancelled).
+local function pick(label)
+  lua([[
+    local label = ...
+    vim.ui.select = function(items, o, done)
+      _G.listed = vim.tbl_map(o.format_item or tostring, items)
+      for _, item in ipairs(items) do
+        if vim.startswith((o.format_item or tostring)(item), label) then
+          return done(item)
+        end
+      end
+      done(nil)
+    end
+  ]], label)
+end
+
+test("actions: a key sends its prompt about the selection, in Normal mode the function around the cursor", function()
+  local log = setup({ "ANSWER\nIt prints pairs.", "ANSWER\nNothing to fix." })
+  keys("2GVj ae")
+  wait("return answered(1)", "the answer")
+  local msg = sent(log)[2]
+  assert(msg:find("Selected lines 2-3:", 1, true) and vim.endswith(msg, "\nRequest: Explain what this code does."), msg)
+  eq({ "  ❯ Explain what this code does.", "    It prints pairs.", "" }, turns())
+  keys("<Esc> af") -- in the popup: a follow-up
+  wait("return answered(2)", "the follow-up")
+  msg = sent(log)[3]
+  assert(msg:find("Selected lines 2-3:", 1, true) and msg:find("Request: Fix the problems", 1, true), msg)
+  keys("<Esc>q")
+  log = setup({ "EDIT\nfunction f(nums)\n  print(#nums)\nend" })
+  keys("4G as")
+  wait("return answered(1)", "the edit")
+  msg = sent(log)[2]
+  assert(msg:find("Selected lines 1-7:", 1, true) and vim.endswith(msg, "Request: Simplify this code without changing what it does."), msg)
+  eq({ "function f(nums)", "  print(#nums)", "end", "-- 8" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 4, false)"))
+  keys("<Esc>q")
+  log = setup({ "ANSWER\nok" })
+  keys("20G ae")
+  wait("return answered(1)", "the answer")
+  msg = sent(log)[2]
+  assert(msg:find("Selected lines 20-20:", 1, true), "outside a function: the line\n" .. msg)
+end)
+
+test("actions: setup changes a key, adds an action and removes one (false)", function()
+  local log = setup({ "ANSWER\nok" }, 0, {
+    actions = { explain = { key = "<leader>aE" }, simplify = false, todo = { key = "<leader>ao", prompt = "List the TODOs." } },
+  })
+  eq({ "", "", true, true }, lua([[return { vim.fn.maparg(" ae", "n"), vim.fn.maparg(" as", "x"),
+    vim.fn.maparg(" aE", "x") ~= "", vim.fn.maparg(" ao", "n") ~= "" }]]), "mappings")
+  keys("4G ao")
+  wait("return answered(1)", "the answer")
+  assert(vim.endswith(sent(log)[2], "Request: List the TODOs."), sent(log)[2])
+  keys("<Esc>q")
+  pick("nothing")
+  keys(":FloatClaude<CR>")
+  eq(true, vim.tbl_contains(lua("return listed"), "explain     <leader>aE"), "the explain prompt is kept")
+end)
+
+test(":FloatClaude lists the actions offered here and runs the one picked", function()
+  local log = setup({ "ANSWER\nok" })
+  pick("nothing")
+  keys(":FloatClaude<CR>")
+  eq({
+    "docstring   <leader>ad",
+    "explain     <leader>ae",
+    "fix         <leader>af",
+    "simplify    <leader>as",
+    "tests       <leader>at",
+    "types       <leader>ay",
+    "ask         <leader>ai",
+    "theme       auto",
+  }, lua("return listed"), "code actions, ask, theme")
+  pick("simplify")
+  keys("2GVj:FloatClaude<CR>")
+  wait("return answered(1)", "the answer")
+  local msg = sent(log)[2]
+  assert(msg:find("Selected lines 2-3:", 1, true) and vim.endswith(msg, "Request: Simplify this code without changing what it does."), msg)
+  pick("hide")
+  keys("<Esc>:FloatClaude<CR>")
+  eq(true, vim.tbl_contains(lua("return listed"), "back to the popup <leader>ai"), "the popup is open")
+  eq({ "lua", nil }, { lua("return vim.bo.filetype"), floats()["float-claude-transcript"] }, "hidden")
+  -- "theme" (the last item), then "dracula" from the themes.
+  lua([[vim.ui.select = function(items, _, done)
+    vim.ui.select = function(_, _, d) d("dracula") end
+    done(items[#items])
+  end]])
+  keys(":FloatClaude<CR>")
+  eq(true, lua("return require('float-claude.theme').ns() == vim.api.nvim_create_namespace('float-claude-theme-dracula')"),
+    "the theme picked")
+end)
+
+test("prose actions: reword edits a markdown paragraph in place; offered on comments, refused on code", function()
+  local log = setup({ "EDIT\nA clearer first line.\nAnd a second one." })
+  lua([[vim.api.nvim_buf_set_lines(0, 0, -1, false, { "# Title", "", "first line  of text", "second line", "", "after" })
+    vim.bo.filetype = "markdown"]])
+  pick("nothing")
+  keys("3G:FloatClaude<CR>")
+  eq({ "grammar     <leader>ag", "reword      <leader>ar", "shorten     <leader>ah", "ask         <leader>ai", "theme       auto" },
+    lua("return listed"), "prose actions only")
+  keys(" ar")
+  wait("return answered(1)", "the edit")
+  eq({ "# Title", "", "A clearer first line.", "And a second one.", "", "after" }, lua("return vim.api.nvim_buf_get_lines(1, 0, -1, false)"))
+  local msg = sent(log)[2]
+  assert(msg:find("(filetype: markdown)", 1, true) and msg:find("Selected lines 3-4:", 1, true)
+    and vim.endswith(msg, "Request: Reword this text so it reads clearly; keep its meaning and tone."), msg)
+  keys("<Esc>q")
+  keys("3G ae")
+  eq("float-claude: explain is for code", last_message())
+  eq(1, #lua("return vim.api.nvim_list_wins()"), "no popup")
+  log = setup({ "ANSWER\nok" })
+  keys("2G ar")
+  eq("float-claude: reword is for markdown, gitcommit, text and comments", last_message())
+  keys("10G ag")
+  wait("return answered(1)", "the answer")
+  msg = sent(log)[2]
+  assert(msg:find("Selected lines 8-40:", 1, true), "the comment block\n" .. msg)
+end)
+
 if failures > 0 then
   io.stdout:write(failures .. " failed\n")
   os.exit(1)

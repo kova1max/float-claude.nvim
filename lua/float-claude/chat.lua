@@ -121,8 +121,27 @@ local function message(s, prompt, followup)
     "<selection>",
     lines(s.first, s.last),
     "</selection>",
-    "Request: " .. prompt,
   })
+  if s.diagnostics then
+    local diags = vim.tbl_filter(function(d)
+      return d.lnum + 1 <= s.last and (d.end_lnum or d.lnum) + 1 >= s.first
+    end, vim.diagnostic.get(buf))
+    table.sort(diags, function(a, b)
+      return a.lnum < b.lnum
+    end)
+    if #diags > 0 then
+      table.insert(out, "Diagnostics in the selected lines:")
+      for _, d in ipairs(diags) do
+        local severity = ({ "error", "warning", "info", "hint" })[d.severity] or "info"
+        local source = d.source and " (" .. d.source .. ")" or ""
+        table.insert(out, string.format("- line %d: %s: %s%s", d.lnum + 1, severity, (d.message:gsub("%s*\n%s*", " ")), source))
+      end
+    elseif s.sent_diagnostics then
+      table.insert(out, "Diagnostics in the selected lines: none now.")
+    end
+    s.sent_diagnostics = #diags > 0
+  end
+  table.insert(out, "Request: " .. prompt)
   return table.concat(out, "\n")
 end
 
@@ -213,7 +232,7 @@ end
 ---  a diff until `accept_key` or `discard_key` is pressed in the popup.
 ---  `hide_key` hides the popup and `unfocus_key` leaves it on screen; either
 ---  way the conversation goes on, and M.focus() comes back to it. A popup
----  already open is closed first.
+---  already open is closed first. With `send`, that prompt is sent right away.
 function M.open(opts)
   if active then
     active.close()
@@ -226,6 +245,7 @@ function M.open(opts)
     first = opts.first,
     last = opts.last,
     context_lines = opts.context_lines,
+    diagnostics = opts.diagnostics,
     exchanges = {}, -- { q = string, a = string, done = boolean, edit = boolean?, note = string? }
     follow = true,
     frame = 1,
@@ -939,14 +959,17 @@ function M.open(opts)
       vim.cmd("startinsert!")
     end
   end
+  local function set_hidden(hidden)
+    if focused() then
+      leave(false)
+    end
+    s.hidden = hidden
+    layout()
+  end
   for _, key in ipairs({ { opts.hide_key, true }, { opts.unfocus_key, false } }) do
     local lhs, hide = unpack(key)
     local function run()
-      if focused() then
-        leave(false)
-      end
-      s.hidden = hide
-      layout()
+      set_hidden(hide)
     end
     if lhs then
       local desc = hide and "float-claude: hide the popup" or "float-claude: back to the code, popup stays"
@@ -1002,9 +1025,27 @@ function M.open(opts)
     end,
   })
 
+  -- Send `text` as if typed in the prompt (ignored while a reply streams).
+  local function send(text)
+    vim.api.nvim_buf_set_lines(s.ibuf, 0, -1, false, vim.split(text, "\n"))
+    submit()
+  end
+
   active = {
     focus = enter,
     close = close,
+    send = send,
+    hide = function()
+      set_hidden(true)
+    end,
+    hidden = function()
+      return s.hidden
+    end,
+    -- The buffer and lines the conversation is about.
+    source = function()
+      sync_selection()
+      return s.buf, s.first, s.last
+    end,
     restyle = function(theme_ns)
       for _, win in ipairs({ s.twin, s.iwin }) do
         vim.api.nvim_win_set_hl_ns(win, theme_ns)
@@ -1024,7 +1065,11 @@ function M.open(opts)
     return fail(err)
   end
   layout()
-  vim.cmd("startinsert")
+  if opts.send then
+    send(opts.send)
+  else
+    vim.cmd("startinsert")
+  end
   return s
 end
 
@@ -1036,6 +1081,12 @@ function M.focus()
   end
   active.focus()
   return true
+end
+
+---The open popup, if any: send(text) as a prompt, hide(), hidden(), and
+---source() for the buffer and lines its conversation is about.
+function M.current()
+  return active
 end
 
 ---Color the open popup, if any, with the theme namespace `theme_ns`.
