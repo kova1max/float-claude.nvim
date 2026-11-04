@@ -4,31 +4,17 @@ local answer = require("float-claude.answer")
 local claude = require("float-claude.claude")
 local edit = require("float-claude.edit")
 local lsp = require("float-claude.lsp")
+local theme = require("float-claude.theme")
 local util = require("float-claude.util")
 
 local M = {}
 
-local active -- the open popup, if any: { focus = fun(), close = fun() }
+local active -- the open popup, if any: { focus = fun(), close = fun(), restyle = fun(ns) }
 
 local ns = vim.api.nvim_create_namespace("float-claude")
 local PREFIX = 4 -- "  ❯ " / "    " before every text line: 2 columns of padding, then the prompt
 local SPINNER = { "◐", "◓", "◑", "◒" }
-local CONTEXT_LINES = 40 -- unselected lines sent around the selection
 local DIFF_CONTEXT = 2 -- unchanged lines around each change in the diffs sent
-
-local function set_highlights()
-  -- `default = true` lets colorschemes and users override these.
-  local bg = "#1c1c1f"
-  vim.api.nvim_set_hl(0, "FloatClaudeNormal", { default = true, fg = "#e6e6e6", bg = bg })
-  vim.api.nvim_set_hl(0, "FloatClaudePrompt", { default = true, fg = "#3fb5c9", bg = bg })
-  vim.api.nvim_set_hl(0, "FloatClaudeHistory", { default = true, fg = "#8a8a8a" })
-  vim.api.nvim_set_hl(0, "FloatClaudeHeader", { default = true, fg = "#4e4e55" })
-  vim.api.nvim_set_hl(0, "FloatClaudeSelection", { default = true, link = "Visual" })
-  vim.api.nvim_set_hl(0, "FloatClaudeAdded", { default = true, bg = "#12301f" })
-  vim.api.nvim_set_hl(0, "FloatClaudeRemoved", { default = true, bg = "#3a1d22" })
-  vim.api.nvim_set_hl(0, "FloatClaudeCode", { default = true, bg = "#2a2a2f" })
-  vim.api.nvim_set_hl(0, "FloatClaudeLink", { default = true, underline = true })
-end
 
 local function width_of(s)
   return vim.fn.strdisplaywidth(s)
@@ -36,7 +22,28 @@ end
 
 -- The lines sent around the selection.
 local function window(s)
-  return math.max(1, s.first - CONTEXT_LINES), math.min(vim.api.nvim_buf_line_count(s.buf), s.last + CONTEXT_LINES)
+  return math.max(1, s.first - s.context_lines), math.min(vim.api.nvim_buf_line_count(s.buf), s.last + s.context_lines)
+end
+
+-- The user's own instructions: the `prompt` option, then the project's file.
+local function instructions(opts, buf)
+  local parts = {}
+  local prompt = opts.prompt
+  if type(prompt) == "function" then
+    local name = vim.api.nvim_buf_get_name(buf)
+    prompt = prompt({ buf = buf, file = name, filetype = vim.bo[buf].filetype })
+  end
+  if type(prompt) == "string" and vim.trim(prompt) ~= "" then
+    table.insert(parts, vim.trim(prompt))
+  end
+  local root = opts.project_prompt and vim.fs.root(buf, opts.project_prompt)
+  if root then
+    local text = vim.trim(table.concat(vim.fn.readfile(vim.fs.joinpath(root, opts.project_prompt)), "\n"))
+    if text ~= "" then
+      table.insert(parts, text)
+    end
+  end
+  return #parts > 0 and table.concat(parts, "\n\n") or nil
 end
 
 -- A unified diff from `old` to `new` (lists of lines) with file line numbers,
@@ -146,10 +153,18 @@ local function parse_tag(reply, final)
   return tag, rest
 end
 
--- Transcript window keys: it is read-only; <Esc>/q close, i/a/<CR> go back to the input.
--- On a name that resolved through LSP, <CR> and a click jump to its definition
--- and K shows hover: `on_link(action)` does that and returns true there.
-local function transcript_keymaps(s, close, on_link)
+-- Map `lhs` (skipped when false) in buffer `buf`.
+local function map(buf, modes, lhs, rhs)
+  if lhs then
+    vim.keymap.set(modes, lhs, rhs, { buffer = buf, nowait = true })
+  end
+end
+
+-- Transcript window keys: it is read-only; the close key closes, the insert
+-- keys and the jump key go back to the input. On a name that resolved through
+-- LSP, the jump key and a click jump to its definition and the hover key shows
+-- hover: `on_link(action)` does that and returns true there.
+local function transcript_keymaps(s, opts, close, on_link)
   local function to_input()
     local ex = s.exchanges[#s.exchanges]
     if not ex or ex.done then
@@ -157,26 +172,26 @@ local function transcript_keymaps(s, close, on_link)
       vim.cmd("startinsert")
     end
   end
-  for _, lhs in ipairs({ "<Esc>", "q" }) do
-    vim.keymap.set("n", lhs, close, { buffer = s.tbuf, nowait = true })
+  map(s.tbuf, "n", opts.close_key, close)
+  for _, lhs in ipairs(opts.insert_keys or {}) do
+    map(s.tbuf, "n", lhs, to_input)
   end
-  for _, lhs in ipairs({ "i", "a" }) do
-    vim.keymap.set("n", lhs, to_input, { buffer = s.tbuf, nowait = true })
-  end
-  vim.keymap.set("n", "<CR>", function()
+  map(s.tbuf, "n", opts.jump_key, function()
     if not on_link("jump") then
       to_input()
     end
-  end, { buffer = s.tbuf, nowait = true })
+  end)
   vim.keymap.set({ "n", "i" }, "<LeftRelease>", function()
     on_link("jump")
   end, { buffer = s.tbuf })
-  vim.keymap.set("n", "K", function()
+  map(s.tbuf, "n", opts.hover_key, function()
     on_link("hover")
-  end, { buffer = s.tbuf, nowait = true })
+  end)
+  map(s.tbuf, "n", opts.scroll_up_key, "<C-u>")
+  map(s.tbuf, "n", opts.scroll_down_key, "<C-d>")
   -- Arrow keys (the wheel, with 'mouse' off) scroll.
-  vim.keymap.set("n", "<Up>", "<C-y>", { buffer = s.tbuf })
-  vim.keymap.set("n", "<Down>", "<C-e>", { buffer = s.tbuf })
+  map(s.tbuf, "n", opts.line_up_key, "<C-y>")
+  map(s.tbuf, "n", opts.line_down_key, "<C-e>")
 end
 
 -- "test.js · L7–13 · 7 lines", or "test.js · L7" for a single line.
@@ -192,25 +207,25 @@ local function header(s, width)
 end
 
 ---Open the popup for lines `first`..`last` of the current window's buffer.
----@param opts { first: integer, last: integer, selected: boolean, cmd: string[], width: integer, placement: string, review_edits: boolean, accept_key: string, discard_key: string, hide_key: string, unfocus_key: string }
+---@param opts table the setup() options (see init.lua), plus `first`, `last` and `selected`
 ---  `selected` is true when the lines come from a Visual selection; they stay
----  highlighted while the popup is open. `placement` is "top-right" (pinned to
----  the editor's top-right corner) or "cursor" (1 row below, 3 columns right of it).
----  With `review_edits`, an edit shows as a diff until `accept_key` or
----  `discard_key` is pressed in the popup. `hide_key` hides the popup and
----  `unfocus_key` leaves it on screen; either way the conversation goes on,
----  and M.focus() comes back to it. A popup already open is closed first.
+---  highlighted while the popup is open. With `review_edits`, an edit shows as
+---  a diff until `accept_key` or `discard_key` is pressed in the popup.
+---  `hide_key` hides the popup and `unfocus_key` leaves it on screen; either
+---  way the conversation goes on, and M.focus() comes back to it. A popup
+---  already open is closed first.
 function M.open(opts)
   if active then
     active.close()
   end
-  set_highlights()
+  local hl_ns = theme.apply(opts.theme, opts.colors)
   local s = {
     win = vim.api.nvim_get_current_win(),
     buf = vim.api.nvim_get_current_buf(),
     cursor = vim.api.nvim_win_get_cursor(0),
     first = opts.first,
     last = opts.last,
+    context_lines = opts.context_lines,
     exchanges = {}, -- { q = string, a = string, done = boolean, edit = boolean?, note = string? }
     follow = true,
     frame = 1,
@@ -296,7 +311,7 @@ function M.open(opts)
     vim.wo[win].scrolloff = 0
     vim.wo[win].sidescrolloff = 0
     vim.wo[win].fillchars = "eob: "
-    vim.wo[win].winhighlight = "Normal:FloatClaudeNormal,NormalNC:FloatClaudeNormal,NormalFloat:FloatClaudeNormal,FloatBorder:FloatClaudeNormal"
+    vim.api.nvim_win_set_hl_ns(win, hl_ns) -- the theme: popup colors, code highlighting in answers
     return win
   end
 
@@ -493,15 +508,21 @@ function M.open(opts)
     local ih = streaming() and 0 or input_rows + 1
     local bottom = vim.o.lines - vim.o.cmdheight - (vim.o.laststatus == 0 and 0 or 1)
     local need = #tlines + ih
+    local cap = opts.max_height or math.huge
     local col, top, room
     if opts.placement == "cursor" then
-      col = math.max(math.min(cursor_col + 3, vim.o.columns - width), 0)
-      local room_below, room_above = bottom - (cursor_row + 1), cursor_row
-      local below = need <= room_below or room_below >= room_above
-      room = math.max(below and room_below or room_above, 1)
-      top = below and cursor_row + 1 or cursor_row - math.min(need, room)
+      local off = opts.cursor_offset
+      col = math.max(math.min(cursor_col + off.col, vim.o.columns - width), 0)
+      -- Above the cursor, the popup ends as far from its line as it starts below it.
+      local gap = math.max(off.row - 1, 0)
+      local room_below, room_above = bottom - (cursor_row + off.row), cursor_row - gap
+      local below = math.min(need, cap) <= room_below or room_below >= room_above
+      room = math.max(math.min(below and room_below or room_above, cap), 1)
+      top = below and cursor_row + off.row or cursor_row - gap - math.min(need, room)
     else
-      col, top, room = vim.o.columns - width, 0, math.max(bottom, 1)
+      local off = opts.top_right_offset
+      col, top = math.max(vim.o.columns - width - off.col, 0), off.row
+      room = math.max(math.min(bottom - off.row, cap), 1)
     end
     ih = math.min(ih, room)
     local th = math.min(#tlines, room - ih)
@@ -577,7 +598,9 @@ function M.open(opts)
       -- The buffer may have shrunk meanwhile (e.g. reloaded from disk).
       cursor = { math.min(s.cursor[1], vim.api.nvim_buf_line_count(buf)), s.cursor[2] }
     end
+    s.keep = true -- not a leave that closes it (close_on_leave)
     vim.api.nvim_set_current_win(win)
+    s.keep = false
     vim.api.nvim_win_set_cursor(win, cursor)
     vim.cmd("stopinsert")
     -- Leaving Insert mode moves the cursor one cell left; put it back once that happened.
@@ -679,6 +702,9 @@ function M.open(opts)
       end
       clear_selection()
       set_selection()
+      if opts.close_after_edit then
+        return close()
+      end
     end
     ex.note = note
     ex.done = true
@@ -817,35 +843,37 @@ function M.open(opts)
     end
   end
 
-  local function map(modes, lhs, rhs)
-    vim.keymap.set(modes, lhs, rhs, { buffer = s.ibuf, nowait = true })
+  local function imap(modes, lhs, rhs)
+    map(s.ibuf, modes, lhs, rhs)
   end
-  map({ "i", "n" }, "<CR>", submit)
-  map("i", "<S-CR>", "<CR>")
-  map("i", "<C-j>", "<CR>")
-  map({ "i", "n" }, "<Esc>", close)
-  map({ "i", "n" }, "<C-u>", function()
+  imap({ "i", "n" }, opts.submit_key, submit)
+  for _, lhs in ipairs(opts.newline_keys or {}) do
+    imap("i", lhs, "<CR>")
+  end
+  -- <Esc> just leaves Insert mode; the close key (Normal mode) closes.
+  imap("n", opts.close_key, close)
+  imap({ "i", "n" }, opts.scroll_up_key, function()
     scroll("<C-u>")
   end)
-  map({ "i", "n" }, "<C-d>", function()
+  imap({ "i", "n" }, opts.scroll_down_key, function()
     scroll("<C-d>", true)
   end)
   -- The wheel does not reach an unfocused float, so the input forwards it.
-  map({ "i", "n" }, "<ScrollWheelUp>", function()
+  imap({ "i", "n" }, "<ScrollWheelUp>", function()
     scroll("3<C-y>")
   end)
-  map({ "i", "n" }, "<ScrollWheelDown>", function()
+  imap({ "i", "n" }, "<ScrollWheelDown>", function()
     scroll("3<C-e>", true)
   end)
   -- With 'mouse' off, terminals send the wheel as arrow keys. They move between
   -- the prompt's lines, and past the first or last one scroll the conversation.
-  map({ "i", "n" }, "<Up>", function()
+  imap({ "i", "n" }, opts.line_up_key, function()
     if vim.fn.line(".") > 1 then
       return vim.api.nvim_feedkeys(vim.keycode("<Up>"), "n", false)
     end
     scroll("<C-y>")
   end)
-  map({ "i", "n" }, "<Down>", function()
+  imap({ "i", "n" }, opts.line_down_key, function()
     if vim.fn.line(".") < vim.fn.line("$") then
       return vim.api.nvim_feedkeys(vim.keycode("<Down>"), "n", false)
     end
@@ -863,7 +891,7 @@ function M.open(opts)
       end
     end,
   })
-  transcript_keymaps(s, close, function(action)
+  transcript_keymaps(s, opts, close, function(action)
     local row, col = unpack(vim.api.nvim_win_get_cursor(0))
     local link = vim.iter(s.links[row] or {}):find(function(l)
       return col >= l[1] and col < l[2]
@@ -883,12 +911,15 @@ function M.open(opts)
   end)
   if opts.review_edits then
     -- While a diff waits the cursor sits in the conversation, in Normal mode.
-    for key, accept in pairs({ [opts.accept_key] = true, [opts.discard_key] = false }) do
-      vim.keymap.set("n", key, function()
-        if reviewing then
-          end_edit(s.exchanges[#s.exchanges], accept and reviewing.accept() or reviewing.discard())
-        end
-      end, { buffer = s.tbuf, desc = accept and "float-claude: accept the edit" or "float-claude: discard the edit" })
+    for _, key in ipairs({ { opts.accept_key, true }, { opts.discard_key, false } }) do
+      local lhs, accept = unpack(key)
+      if lhs then
+        vim.keymap.set("n", lhs, function()
+          if reviewing then
+            end_edit(s.exchanges[#s.exchanges], accept and reviewing.accept() or reviewing.discard())
+          end
+        end, { buffer = s.tbuf, desc = accept and "float-claude: accept the edit" or "float-claude: discard the edit" })
+      end
     end
   end
 
@@ -908,7 +939,8 @@ function M.open(opts)
       vim.cmd("startinsert!")
     end
   end
-  for key, hide in pairs({ [opts.hide_key] = true, [opts.unfocus_key] = false }) do
+  for _, key in ipairs({ { opts.hide_key, true }, { opts.unfocus_key, false } }) do
+    local lhs, hide = unpack(key)
     local function run()
       if focused() then
         leave(false)
@@ -916,9 +948,27 @@ function M.open(opts)
       s.hidden = hide
       layout()
     end
-    local desc = hide and "float-claude: hide the popup" or "float-claude: back to the code, popup stays"
-    vim.keymap.set({ "i", "n" }, key, run, { buffer = s.ibuf, nowait = true, desc = desc })
-    vim.keymap.set("n", key, run, { buffer = s.tbuf, nowait = true, desc = desc })
+    if lhs then
+      local desc = hide and "float-claude: hide the popup" or "float-claude: back to the code, popup stays"
+      vim.keymap.set({ "i", "n" }, lhs, run, { buffer = s.ibuf, nowait = true, desc = desc })
+      vim.keymap.set("n", lhs, run, { buffer = s.tbuf, nowait = true, desc = desc })
+    end
+  end
+  if opts.close_on_leave then
+    -- Leaving it other than with the unfocus key or a jump (leave()) closes it.
+    vim.api.nvim_create_autocmd("WinLeave", {
+      group = group,
+      callback = function()
+        local win = vim.api.nvim_get_current_win()
+        if not s.keep and (win == s.iwin or win == s.twin) then
+          vim.schedule(function()
+            if not closed and not s.hidden and not focused() then
+              close()
+            end
+          end)
+        end
+      end,
+    })
   end
 
   vim.api.nvim_create_autocmd(
@@ -949,10 +999,24 @@ function M.open(opts)
     end,
   })
 
-  active = { focus = enter, close = close }
+  active = {
+    focus = enter,
+    close = close,
+    restyle = function(theme_ns)
+      for _, win in ipairs({ s.twin, s.iwin }) do
+        vim.api.nvim_win_set_hl_ns(win, theme_ns)
+      end
+    end,
+  }
   -- Start the CLI now so its startup overlaps with typing the prompt.
   local err
-  proc, err = claude.start({ cmd = opts.cmd, on_delta = on_delta, on_done = on_done, on_error = fail })
+  proc, err = claude.start({
+    cmd = opts.cmd,
+    instructions = instructions(opts, s.buf),
+    on_delta = on_delta,
+    on_done = on_done,
+    on_error = fail,
+  })
   if not proc then
     return fail(err)
   end
@@ -969,6 +1033,13 @@ function M.focus()
   end
   active.focus()
   return true
+end
+
+---Color the open popup, if any, with the theme namespace `theme_ns`.
+function M.restyle(theme_ns)
+  if active then
+    active.restyle(theme_ns)
+  end
 end
 
 return M

@@ -44,15 +44,18 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `<CR>` | Popup | Send the prompt |
 | `<S-CR>` or `<C-j>` | Popup | New line in the prompt (use `<C-j>` if your terminal does not send Shift-Enter) |
 | `<C-u>` / `<C-d>`, mouse wheel, `<Up>` / `<Down>` | Popup | Scroll the conversation (in a multi-line prompt the arrows first move between its lines) |
-| `<Esc>` | Popup | Close and end the conversation; a half-written edit is undone |
+| `<Esc>` | Popup | Leave Insert mode, as anywhere in Vim |
+| `q` | Popup, Normal mode | Close and end the conversation; a half-written edit is undone |
 | `<C-q>` | Popup | Hide it; the conversation goes on in the background |
 | `<C-o>` | Popup | Back to the code; the popup stays on screen |
 | `<leader>yy` / `<leader>nn` | Popup, with `review_edits` | Accept / discard the edit shown as a diff |
 | `<CR>` or a click / `K` | Conversation, on an underlined name | Jump to its definition in the code window / show its hover (see below) |
 
+Every key above is a setup option (see [Configuration](#configuration)).
+
 The popup has a fixed width (see `width` below) and grows downwards with the conversation; a longer prompt or answer wraps onto more rows, never scrolling sideways.
 
-The conversation scrolls like a chat: once it no longer fits, each new question moves to the top of the popup and the answer streams in below it, following the newest line. Scroll back and the view stays put while the answer streams and while you type the next prompt; scroll down again to follow. The history is read-only. While a reply streams, the cursor sits in the conversation, so Normal-mode motions scroll it too; `<Esc>` or `q` closes. With `mouse` off (as with hardtime.nvim), most terminals send the wheel as arrow keys, so the wheel still scrolls.
+The conversation scrolls like a chat: once it no longer fits, each new question moves to the top of the popup and the answer streams in below it, following the newest line. Scroll back and the view stays put while the answer streams and while you type the next prompt; scroll down again to follow. The history is read-only. While a reply streams, the cursor sits in the conversation, so Normal-mode motions scroll it too; `q` closes. With `mouse` off (as with hardtime.nvim), most terminals send the wheel as arrow keys, so the wheel still scrolls.
 
 ### Hiding and leaving the popup
 
@@ -61,7 +64,7 @@ The popup does not have to be in the way, and does not have to go away:
 - `<C-q>` hides it and puts you back in the code. The conversation goes on: an answer keeps streaming and an edit keeps writing while it is hidden.
 - `<C-o>` (or leaving it any other way: another window, a split, another file) puts you back in the code with the popup still on screen, on top of whatever is shown there. It stays where it opened (top-right, or at the cursor it opened at) and answers keep streaming into it.
 
-`<leader>ai` in Normal mode brings you back into it, showing it first if hidden, with the same conversation and scroll position. A new Visual selection with `<leader>ai` starts a fresh chat in its place. `<Esc>` in the popup (or `:q` in it) closes it and ends the conversation. Files never open inside the popup; `:e` there is refused.
+`<leader>ai` in Normal mode brings you back into it, showing it first if hidden, with the same conversation and scroll position. A new Visual selection with `<leader>ai` starts a fresh chat in its place. `q` in the popup (Normal mode; `<Esc>` first if you are typing) or `:q` in it closes it and ends the conversation. Prefer the popup to go away on its own? See `close_after_edit` and `close_on_leave` below. Files never open inside the popup; `:e` there is refused.
 
 ### Code in answers
 
@@ -80,7 +83,7 @@ The popup stays open either way, so you can keep asking. Hiding or leaving the p
 
 ### What Claude sees
 
-Claude gets the file name and filetype, the selected lines, and up to 40 lines around them. Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
+Claude gets the file name and filetype, the selected lines, and up to 40 lines around them (`context_lines`). Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
 
 Claude also remembers what it changed. Each follow-up starts with a short record of what happened since its last reply, as diffs rather than copies of the code:
 
@@ -92,35 +95,94 @@ So "what did you change?" gets its edits apart from yours, and "undo your second
 
 Because no settings files are loaded, your Claude Code hooks, `CLAUDE.md` files and `settings.json` are not used. Auth must come from your normal `claude` login or from environment variables such as `ANTHROPIC_API_KEY` or `CLAUDE_CODE_USE_BEDROCK` set in the shell Neovim runs in; provider settings or an `apiKeyHelper` in `settings.json` are not read.
 
-## Configuration
+### Your own instructions
+
+To tell Claude something in every chat ("answer in Ukrainian", "prefer early returns"), use the `prompt` option: a string, or a function that gets `{ buf, file, filetype }` and returns one (or `nil`), so it can depend on the language or the project:
 
 ```lua
-require("float-claude").setup({
-  keymap = "<leader>ai", -- Visual + Normal mode; false to skip it and map require("float-claude").ask yourself
-  cmd = { "claude" }, -- the CLI, with extra arguments if you like, e.g. { "claude", "--model", "sonnet" }
-  width = 50, -- popup width in columns, capped to the screen; longer lines wrap
-  placement = "top-right", -- or "cursor": the popup's top-left corner 1 row below and 3 columns right of the cursor
-  review_edits = false, -- true: show an edit as a diff and apply it only once accepted
-  accept_key = "<leader>yy", -- with review_edits: accept the diff (Normal mode, in the popup)
-  discard_key = "<leader>nn", -- with review_edits: discard it
-  hide_key = "<C-q>", -- in the popup (Insert and Normal mode): hide it, the conversation goes on
-  unfocus_key = "<C-o>", -- in the popup: back to the code, the popup stays on screen
-})
+opts = {
+  prompt = function(ctx)
+    if ctx.filetype == "go" then
+      return "Wrap errors with fmt.Errorf and %w."
+    end
+  end,
+}
 ```
 
-Colors come from highlight groups defined with `default = true`, so a colorscheme or your config can override them:
+A project can add its own: a `.float-claude.md` file in the file's directory or any directory above it (the nearest one wins) is added after `prompt`. Set `project_prompt = false` to ignore such files, or to another file name to use that. Note that a cloned repository can bring one: it can steer the replies and edits you get in that project (Claude still has no tools there, and edits show in the buffer, one `u` away, or as a diff with `review_edits`).
 
-| Group | Default | Used for |
-|---|---|---|
-| `FloatClaudeNormal` | `fg = #e6e6e6, bg = #1c1c1f` | popup, typed text, answers |
-| `FloatClaudePrompt` | `fg = #3fb5c9` | the `❯` |
-| `FloatClaudeHistory` | `fg = #8a8a8a` | sent questions, spinners, `refactoring…`, edit notes |
-| `FloatClaudeHeader` | `fg = #4e4e55` | the file and lines header |
-| `FloatClaudeSelection` | links to `Visual` | the selected lines while the popup or an edit is active |
-| `FloatClaudeAdded` | `bg = #12301f` | freshly written lines, added lines in a review diff |
-| `FloatClaudeRemoved` | `bg = #3a1d22` | removed lines in a review diff |
-| `FloatClaudeCode` | `bg = #2a2a2f` | inline code in answers |
-| `FloatClaudeLink` | `underline = true` | names in answers that resolve through LSP |
+Both come after the built-in instructions, and the reply format (an edit or an answer) always wins over them.
+
+### Themes
+
+The popup follows your colorscheme by default (`theme = "auto"`): its text and background come from your floating windows' colors (or your editor background, a little lighter or darker, so the borderless popup stands out), the `❯` from `Function`, the dimmed text from `Comment` and `LineNr`, and the diff colors from `DiffAdd` and `DiffDelete`. It follows a `:colorscheme` change too.
+
+Or give the popup a look of its own, whatever the colorscheme: `theme` can be one of `night-owl`, `dracula`, `tokyonight`, `catppuccin` (mocha), `gruvbox` (dark), `nord`, `onedark`, `rose-pine`, or `float-claude` (the plugin's original look: near-black with a cyan `❯`). A theme colors the popup only: its background, text, prompt, header and the code in answers (a preset's own syntax colors; with `auto` and `float-claude` your colorscheme's), plus the selection and diff lines in the code. The rest of Neovim keeps its colorscheme.
+
+`:FloatClaudeTheme <name>` (with completion) switches it for the session, an open popup included; put the one you like in `theme` to keep it.
+
+`colors` sets single colors on top of any theme, `auto` included:
+
+```lua
+opts = {
+  theme = "tokyonight",
+  colors = { bg = "#000000", prompt = "#ff9e64" },
+}
+```
+
+| Key | Used for |
+|---|---|
+| `bg`, `fg` | popup background, typed text and answers |
+| `prompt` | the `❯` |
+| `history` | sent questions, spinners, `refactoring…`, edit notes |
+| `header` | the file and lines header |
+| `code` | inline code background in answers (default: `bg`, a little towards `fg`) |
+| `selection` | the selected lines while the popup or an edit is active (default: `Visual`) |
+| `added`, `removed` | new lines of an edit and of a review diff, removed lines of a review diff |
+| `comment`, `keyword`, `string`, `number`, `func`, `type`, `constant`, `operator`, `property` | code in answers |
+
+The popup's colors are the highlight groups `FloatClaudeNormal`, `FloatClaudePrompt`, `FloatClaudeHistory`, `FloatClaudeHeader`, `FloatClaudeCode`, `FloatClaudeSelection`, `FloatClaudeAdded`, `FloatClaudeRemoved` and `FloatClaudeLink` (underlined names); the plugin sets them from the theme, so change them through `theme` and `colors`.
+
+## Configuration
+
+Every option, with its default (`opts` for lazy.nvim, or `require("float-claude").setup({...})`). Any key can be `false` to leave it unmapped. A table option (like `cursor_offset`) is replaced as a whole, so give all of its fields.
+
+```lua
+{
+  keymap = "<leader>ai", -- Visual + Normal mode: ask about the selection / back to the popup; false to map require("float-claude").ask yourself
+  cmd = { "claude" }, -- the CLI, with extra arguments if you like, e.g. { "claude", "--model", "sonnet" }
+  prompt = false, -- your instructions for every chat: a string, or function(ctx) returning one (see above)
+  project_prompt = ".float-claude.md", -- file added from the file's directory or above; false to ignore
+  context_lines = 40, -- unselected lines sent above and below the selection
+  width = 50, -- popup width in columns, capped to the screen; longer lines wrap
+  max_height = false, -- popup height cap in rows; false: as tall as the screen allows
+  placement = "top-right", -- or "cursor": next to the cursor
+  top_right_offset = { row = 0, col = 0 }, -- "top-right": rows from the top, columns from the right edge
+  cursor_offset = { row = 1, col = 3 }, -- "cursor": rows below, columns right of the cursor (above it when there is no room below)
+  theme = "auto", -- or a preset, see Themes
+  colors = {}, -- single colors over the theme, see Themes
+  review_edits = false, -- true: show an edit as a diff and apply it only once accepted
+  close_after_edit = false, -- true: close the popup (ending the chat) once an edit is applied
+  close_on_leave = false, -- true: leaving the popup (other than with unfocus_key or a jump) closes it
+  -- Keys in the popup:
+  submit_key = "<CR>", -- send the prompt (Insert and Normal mode)
+  newline_keys = { "<S-CR>", "<C-j>" }, -- Insert mode: a new line in the prompt
+  close_key = "q", -- Normal mode: close the popup and end the chat
+  hide_key = "<C-q>", -- hide it; the chat goes on, keymap brings it back
+  unfocus_key = "<C-o>", -- back to the code, the popup stays on screen
+  accept_key = "<leader>yy", -- with review_edits: accept the diff (Normal mode)
+  discard_key = "<leader>nn", -- with review_edits: discard it
+  scroll_up_key = "<C-u>", -- scroll the conversation half a screen
+  scroll_down_key = "<C-d>",
+  line_up_key = "<Up>", -- scroll it a line (in a multi-line prompt, first move between its lines)
+  line_down_key = "<Down>",
+  jump_key = "<CR>", -- in the conversation, on an underlined name: go to its definition
+  hover_key = "K", -- in the conversation, on an underlined name: show its hover
+  insert_keys = { "i", "a" }, -- in the conversation: back to the prompt
+}
+```
+
+Changed an option? Restart Neovim for it to apply.
 
 ## Development
 
@@ -129,3 +191,5 @@ Run the tests (headless; a fake CLI stands in for Claude and a fake LSP server f
 ```sh
 nvim --clean --headless -l tests/run.lua
 ```
+
+`ONLY=<text>` runs just the tests whose name contains the text.

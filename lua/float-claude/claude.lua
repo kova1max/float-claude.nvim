@@ -31,13 +31,20 @@ local ARGS = {
 ---@field send fun(text: string)
 ---@field stop fun()
 
----Start the CLI. Callbacks run on the main loop.
----@param opts { cmd: string[], on_delta: fun(text: string), on_done: fun(), on_error: fun(msg: string) }
+---Start the CLI. Callbacks run on the main loop. `instructions` are the user's
+---own, added after the built-in system prompt.
+---@param opts { cmd: string[], instructions: string?, on_delta: fun(text: string), on_done: fun(), on_error: fun(msg: string) }
 ---@return float-claude.Process? process
 ---@return string? err
 function M.start(opts)
   local cmd = vim.list_extend(vim.deepcopy(opts.cmd), ARGS)
-  vim.list_extend(cmd, { "--system-prompt", M.system_prompt })
+  local system_prompt = M.system_prompt
+  if opts.instructions then
+    system_prompt = system_prompt
+      .. "\n\nThe user's own instructions follow. Follow them, but the reply format above (the EDIT or ANSWER first line, and an EDIT being code only) always comes first:\n"
+      .. opts.instructions
+  end
+  vim.list_extend(cmd, { "--system-prompt", system_prompt })
 
   local stopped, busy, failed = false, false, false
   local pending, stderr = "", ""

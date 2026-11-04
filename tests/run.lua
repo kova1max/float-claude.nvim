@@ -38,6 +38,10 @@ local function eq(expected, actual, what)
 end
 
 local function test(name, fn)
+  -- ONLY=<text> runs just the tests whose name contains it.
+  if os.getenv("ONLY") and not name:find(os.getenv("ONLY"), 1, true) then
+    return
+  end
   chan = vim.fn.jobstart({ vim.v.progpath, "--clean", "-n", "--embed", "--headless", "--cmd", "set rtp^=" .. root }, {
     rpc = true,
     env = env,
@@ -321,10 +325,15 @@ test("cursor placement in a window with a winbar", function()
   eq(lua("return vim.fn.screenpos(1000, 6, 1).row"), floats()["float-claude-transcript"].row, "row")
 end)
 
-test("Esc closes the popup and restores everything", function()
+test("Esc only leaves Insert mode; q closes the popup and restores everything", function()
   setup()
   ask()
   keys("abc<Esc>")
+  eq({ "float-claude", "n", 3 }, lua("return { vim.bo.filetype, vim.fn.mode(), #vim.api.nvim_list_wins() }"),
+    "still in the prompt, Normal mode")
+  keys("iq<Esc>")
+  eq({ "abqc" }, lua("return vim.api.nvim_buf_get_lines(0, 0, -1, false)"), "q types q in Insert mode")
+  keys("q")
   eq({ mode = "n", cursor = { 6, 0 }, wins = 1, bufs = 1, marks = 0 }, lua([[return {
     mode = vim.fn.mode(), cursor = vim.api.nvim_win_get_cursor(0),
     wins = #vim.api.nvim_list_wins(), bufs = #vim.api.nvim_list_bufs(),
@@ -357,7 +366,7 @@ test("edit: the reply replaces the selection, fences stripped; the popup stays; 
     return { m[2], m[4].end_row, m[4].hl_group }
   ]])
   eq({ 1, 4, "FloatClaudeSelection" }, sel, "the new lines are the selection now")
-  keys("<Esc>")
+  keys("<Esc>q")
   eq({ 1, 0, "n" }, { #lua("return vim.api.nvim_list_wins()"), marks(), lua("return vim.fn.mode()") }, "closed")
   eq({ 2, 2 }, lua("return vim.api.nvim_win_get_cursor(0)"), "cursor on the first new line")
   keys("u")
@@ -385,16 +394,18 @@ test("edit: streams line by line with the new lines highlighted", function()
   ]])
   eq(1, added, "highlighted new lines")
   wait("return answered(1)", "the edit")
-  keys("<Esc>u")
+  keys("<Esc>qu")
   eq(ORIGINAL, buffer(), "after one undo")
 end)
 
-test("edit: Esc while streaming stops and restores the original", function()
+test("edit: q while streaming stops and restores the original", function()
   setup({ "EDIT\n  a()\n  b()\n  c()\n  d()\n" }, 200)
   ask()
   keys("go<CR>")
   wait("return vim.api.nvim_buf_get_lines(1, 1, 2, false)[1] == '  a()'", "the first line")
   keys("<Esc>")
+  eq(3, #lua("return vim.api.nvim_list_wins()"), "Esc does not close")
+  keys("q")
   eq(ORIGINAL, buffer(), "original restored")
   eq({ true, 0, 1 }, lua("return { vim.bo.modifiable, #vim.api.nvim_buf_get_extmarks(1, -1, 0, -1, {}), #vim.api.nvim_list_wins() }"))
   lua("vim.wait(600)")
@@ -439,7 +450,7 @@ test("review_edits: an edit shows as a diff until <leader>yy accepts it; one u u
   eq({ "float-claude", "i", true }, lua("return { vim.bo.filetype, vim.fn.mode(), vim.bo[1].modifiable }"),
     "back in the prompt, buffer unlocked")
   eq({ removed = {}, added = {} }, lua("return diff_view()"), "diff gone")
-  keys("<Esc>u")
+  keys("<Esc>qu")
   eq(ORIGINAL, buffer(), "after one undo")
 end)
 
@@ -516,7 +527,7 @@ test("review_edits: closing the popup discards the diff", function()
   ask()
   keys("go<CR>")
   wait("return reviewing()", "the diff")
-  keys("<Esc>")
+  keys("q")
   eq(ORIGINAL, buffer())
   eq({ 1, 0, true, "n" }, { #lua("return vim.api.nvim_list_wins()"), marks(), lua("return vim.bo[1].modifiable"),
     lua("return vim.fn.mode()") })
@@ -629,7 +640,7 @@ test("after an edit, a follow-up edit works on the edited lines; each is one und
   eq({ "function f(nums)", "  c()", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 3, false)"))
   assert(sent(log)[3]:find("Selected lines 2-3:\n<selection>\n  a()\n  b()\n</selection>\nRequest: also merge them", 1, true),
     "the follow-up carries the edited lines")
-  keys("<Esc>")
+  keys("<Esc>q")
   keys("u")
   eq({ "function f(nums)", "  a()", "  b()", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 4, false)"))
   keys("u")
@@ -1100,7 +1111,7 @@ test("the unfocus key leaves the popup on screen over other files and splits; <l
   eq({ "float-claude", "i", { "abc" }, 4 }, lua([[return { vim.bo.filetype, vim.fn.mode(),
     vim.api.nvim_buf_get_lines(0, 0, -1, false), vim.fn.col(".") }]]), "back in the prompt, after the text")
   eq(false, lua("return pcall(vim.cmd.edit, 'other.txt')"), "files do not open in the popup")
-  keys("<Esc>")
+  keys("<Esc>q")
   eq({ 2, 0, 2 }, { #lua("return vim.api.nvim_list_wins()"), marks(), #lua("return vim.api.nvim_list_bufs()") },
     "closed, back in the new window")
   eq(false, lua("return vim.api.nvim_get_current_win() == 1000"), "the window <leader>ai was pressed in")
@@ -1196,15 +1207,154 @@ test(":q in the popup or wiping the buffer ends the conversation", function()
   eq(3, #lua("return vim.api.nvim_list_wins()"), "a new chat opens")
 end)
 
-test("highlight groups can be overridden", function()
+-- Highlight `name` as defined in namespace `ns` (0: global).
+local function hl(name, ns)
+  return lua("local ns, name = ... return vim.api.nvim_get_hl(ns, { name = name })", ns or 0, name)
+end
+
+-- The highlight namespace of each window, by its buffer's filetype ("lua" for the code).
+local function hl_namespaces()
+  return lua([[
+    local out = {}
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+      out[vim.bo[vim.api.nvim_win_get_buf(w)].filetype] = vim.api.nvim_get_hl_ns({ winid = w })
+    end
+    return out
+  ]])
+end
+
+test("theme auto (the default) follows the colorscheme, also on a change", function()
   setup()
-  lua([[vim.api.nvim_set_hl(0, "FloatClaudeNormal", { bg = "#123456" })]])
+  lua([[
+    vim.cmd("hi clear | hi clear NormalFloat")
+    vim.cmd("hi Normal guifg=#101010 guibg=#fafafa | hi Comment guifg=#777777 | hi Function guifg=#0000aa")
+    vim.cmd("hi LineNr guifg=#bbbbbb | hi DiffAdd guibg=#ddffdd")
+    vim.api.nvim_exec_autocmds("ColorScheme", {})
+  ]])
   ask()
-  eq(0x123456, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudeNormal" }).bg]]), "bg")
-  eq(0x3fb5c9, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudePrompt" }).fg]]), "prompt fg")
-  eq(0x8a8a8a, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudeHistory" }).fg]]), "history fg")
-  eq(0x12301f, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudeAdded" }).bg]]), "added bg")
-  eq(0x3a1d22, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudeRemoved" }).bg]]), "removed bg")
+  eq({ fg = 0x101010, bg = 0xeaeaea }, hl("FloatClaudeNormal"), "text, and the editor's background a little towards it")
+  eq({ 0x0000aa, 0x777777, 0xbbbbbb, 0xddffdd }, { hl("FloatClaudePrompt").fg, hl("FloatClaudeHistory").fg,
+    hl("FloatClaudeHeader").fg, hl("FloatClaudeAdded").bg }, "prompt, history, header, added")
+  local ns = hl_namespaces()
+  eq(true, ns["float-claude"] > 0 and ns["float-claude"] == ns["float-claude-transcript"], "the popup's own namespace")
+  eq(-1, ns.lua, "not the code window")
+  eq({ link = "FloatClaudeNormal" }, hl("Normal", ns["float-claude"]), "the popup's Normal")
+  lua([[vim.cmd("hi NormalFloat guifg=#202020 guibg=#e0e0e0") vim.api.nvim_exec_autocmds("ColorScheme", {})]])
+  eq({ fg = 0x202020, bg = 0xe0e0e0 }, hl("FloatClaudeNormal"), "the colorscheme's float colors, once it has them")
+end)
+
+test("themes: a preset and single colors restyle only the popup; :FloatClaudeTheme switches live", function()
+  setup(nil, 0, { theme = "nord", colors = { bg = "#000000", keyword = "#123456" } })
+  local keyword = hl("@keyword")
+  lua([[vim.api.nvim_set_hl(0, "@function.method.call", { fg = "#010203" })]]) -- a colorscheme's specific group
+  ask()
+  eq({ fg = 0xd8dee9, bg = 0 }, hl("FloatClaudeNormal"), "nord with its bg overridden")
+  local ns = hl_namespaces()["float-claude"]
+  eq({ 0x123456, 0xa3be8c }, { hl("@keyword", ns).fg, hl("@string", ns).fg }, "code in answers: overridden, nord")
+  eq(keyword, hl("@keyword"), "the rest of Neovim keeps its colors")
+  eq({ "dracula" }, lua([[return vim.fn.getcompletion("FloatClaudeTheme dr", "cmdline")]]), "completion")
+  lua("vim.cmd('FloatClaudeTheme dracula')")
+  ns = hl_namespaces()["float-claude"]
+  eq({ fg = 0xf8f8f2, bg = 0 }, hl("FloatClaudeNormal"), "dracula, the colors option still applies")
+  eq({ 0x123456, 0xf1fa8c, 0x44475a }, { hl("@keyword", ns).fg, hl("@string", ns).fg, hl("FloatClaudeSelection").bg },
+    "dracula's code colors and selection")
+  eq(0x50fa7b, hl("@function.method.call", ns).fg, "the colorscheme's specific groups follow the theme too")
+  eq(ns, hl_namespaces()["float-claude-transcript"], "both popup windows switched")
+  lua("vim.cmd('FloatClaudeTheme float-claude')")
+  eq({ 0x3fb5c9, 0x8a8a8a }, { hl("FloatClaudePrompt").fg, hl("FloatClaudeHistory").fg }, "the original look")
+  ns = hl_namespaces()["float-claude"]
+  eq({ {}, 0x123456 }, { hl("@string", ns), hl("@keyword", ns).fg },
+    "without syntax colors it keeps the colorscheme's, but for the colors option")
+  lua("vim.cmd('FloatClaudeTheme nope')")
+  eq('float-claude: unknown theme "nope"', last_message())
+  eq(0x3fb5c9, hl("FloatClaudePrompt").fg, "unchanged")
+end)
+
+-- The system prompt the fake CLI was started with.
+local function system_prompt(log)
+  wait("return logged(1)", "the CLI to start")
+  local argv = vim.json.decode(vim.fn.readfile(log)[1]).argv -- an object: Lua's `arg` has an index 0
+  for i = 1, vim.tbl_count(argv) do
+    if argv[tostring(i)] == "--system-prompt" then
+      return argv[tostring(i + 1)]
+    end
+  end
+end
+
+test("custom prompt: the prompt option and the project's .float-claude.md reach Claude", function()
+  local log = setup()
+  lua([[require("float-claude").setup({ prompt = function(ctx)
+    return "Reply in " .. ctx.filetype .. " style."
+  end })]])
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir .. "/src", "p")
+  vim.fn.writefile({ "Prefer early returns.", "" }, dir .. "/.float-claude.md")
+  lua("vim.api.nvim_buf_set_name(0, ...)", dir .. "/src/demo.lua")
+  ask()
+  local text = system_prompt(log)
+  assert(vim.startswith(text, lua("return require('float-claude.claude').system_prompt")), "built-in rules first")
+  assert(vim.endswith(text, "always comes first:\nReply in lua style.\n\nPrefer early returns."), text)
+  keys("<Esc>q")
+  log = setup(nil, 0, { prompt = false, project_prompt = false })
+  ask()
+  eq(lua("return require('float-claude.claude').system_prompt"), system_prompt(log), "only the built-in prompt")
+  vim.fn.delete(dir, "rf")
+end)
+
+test("keys are setup options; false leaves one unmapped", function()
+  local log = setup({ "ANSWER\nok" }, 0, {
+    submit_key = "<C-s>", newline_keys = { "<C-l>" }, close_key = "Q", insert_keys = { "o" }, hide_key = false,
+  })
+  ask()
+  keys("a<CR>b<C-l>c")
+  eq({ "a", "b", "c" }, floats()["float-claude"].lines, "Enter and the newline key add lines")
+  eq({ "", "" }, lua([[return { vim.fn.maparg("<C-q>", "i"), vim.fn.maparg("<Esc>", "i") }]]),
+    "the hide key is unmapped, Esc too")
+  keys("<C-s>")
+  wait("return answered(1)", "the answer")
+  eq("Request: a\nb\nc", sent(log)[2]:match("Request: .*$"), "sent with the submit key")
+  keys("<Esc><C-w>wo")
+  eq({ "float-claude", "i" }, lua("return { vim.bo.filetype, vim.fn.mode() }"), "an insert key")
+  eq("", lua([[return vim.fn.maparg("q", "n")]]), "q is not the close key")
+  keys("<Esc>Q")
+  eq(1, #lua("return vim.api.nvim_list_wins()"), "closed")
+end)
+
+test("placement offsets and max_height", function()
+  setup(nil, 0, { top_right_offset = { row = 2, col = 5 }, max_height = 5 })
+  ask()
+  local f = floats()
+  eq({ 2, 25 }, { f["float-claude-transcript"].row, f["float-claude-transcript"].col }, "top right, offset")
+  keys("a<C-j>b<C-j>c")
+  f = floats()
+  eq({ 1, 4 }, { f["float-claude-transcript"].height, f["float-claude"].height }, "capped: 6 rows in 5")
+  keys("<Esc>q")
+  setup(nil, 0, { placement = "cursor", cursor_offset = { row = 2, col = 0 } })
+  ask()
+  local cursor = lua("local p = vim.fn.screenpos(1000, 6, 1) return { p.row - 1, p.col - 1 }")
+  f = floats()
+  eq({ cursor[1] + 2, cursor[2] }, { f["float-claude-transcript"].row, f["float-claude-transcript"].col }, "at the cursor, offset")
+end)
+
+test("close_after_edit closes once the edit is applied; close_on_leave closes when leaving", function()
+  setup({ "EDIT\n  a()\n" }, 0, { close_after_edit = true })
+  ask()
+  keys("go<CR>")
+  wait("return #vim.api.nvim_list_wins() == 1", "the popup to close")
+  eq({ "function f(nums)", "  a()", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 3, false)"), "applied")
+  eq({ "n", { 2, 2 } }, { lua("return vim.fn.mode()"), lua("return vim.api.nvim_win_get_cursor(0)") },
+    "back on the new lines")
+  wait("return #vim.api.nvim_buf_get_extmarks(1, -1, 0, -1, {}) == 0", "the selection and the green flash to clear")
+  setup({ "ANSWER\nok" }, 0, { close_on_leave = true })
+  ask()
+  keys("hi<CR>")
+  wait("return answered(1)", "the answer")
+  keys("<C-\\><C-n><C-w>w")
+  eq(3, #lua("return vim.api.nvim_list_wins()"), "moving within the popup keeps it")
+  keys("<C-o>")
+  eq(3, #lua("return vim.api.nvim_list_wins()"), "the unfocus key keeps it")
+  keys(" ai<C-\\><C-n><C-w>p")
+  wait("return #vim.api.nvim_list_wins() == 1", "the popup to close")
 end)
 
 if failures > 0 then
