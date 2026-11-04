@@ -251,25 +251,36 @@ function M.start(opts)
     end
   end
 
+  -- Changed by someone else despite the lock: stop, touch nothing.
+  local function changed()
+    vim.schedule(function()
+      if pending then
+        self.discard()
+        opts.on_end(nil)
+        util.error("the buffer changed during the review; the edit was discarded")
+      elseif not ended then
+        written = 0
+        self.cancel("the buffer changed during the edit; stopped")
+      end
+    end)
+  end
   vim.api.nvim_buf_attach(buf, false, {
     on_lines = function()
       if ended and not pending then
         return true
       end
       if not writing then
-        -- Changed by someone else despite the lock (e.g. reloaded from disk): stop, touch nothing.
-        vim.schedule(function()
-          if pending then
-            self.discard()
-            opts.on_end(nil)
-            util.error("the buffer changed during the review; the edit was discarded")
-          elseif not ended then
-            written = 0
-            self.cancel("the buffer changed during the edit; stopped")
-          end
-        end)
+        changed()
         return true
       end
+    end,
+    -- Reloaded from disk: reported here, not through on_lines.
+    on_reload = function()
+      if ended and not pending then
+        return true
+      end
+      changed()
+      return true
     end,
   })
 

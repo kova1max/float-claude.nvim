@@ -435,6 +435,8 @@ function M.open(opts)
   local function restore_focus()
     if vim.api.nvim_win_is_valid(s.win) then
       vim.api.nvim_set_current_win(s.win)
+      -- The buffer may have shrunk meanwhile (e.g. reloaded from disk).
+      s.cursor[1] = math.min(s.cursor[1], vim.api.nvim_buf_line_count(s.buf))
       vim.api.nvim_win_set_cursor(s.win, s.cursor)
     end
     vim.cmd("stopinsert")
