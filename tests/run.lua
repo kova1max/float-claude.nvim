@@ -274,6 +274,16 @@ test("Esc closes the popup and restores everything", function()
     marks = #vim.api.nvim_buf_get_extmarks(1, -1, 0, -1, {}) }]]))
 end)
 
+test("before the first send, i in the conversation window goes back to the prompt", function()
+  setup()
+  ask()
+  keys("abc<C-\\><C-n><C-w>w")
+  eq({ "float-claude-transcript", "n" }, lua("return { vim.bo.filetype, vim.fn.mode() }"), "in the conversation")
+  keys("i")
+  eq({ "float-claude", "i", 3 }, lua("return { vim.bo.filetype, vim.fn.mode(), #vim.api.nvim_list_wins() }"),
+    "back in the prompt, Insert mode")
+end)
+
 test("edit: the reply replaces the selection, fences stripped; the popup stays; one u undoes it", function()
   local log = setup({ "EDIT\n```lua\n  for _, a in ipairs(nums) do\n    print(a)\n  end\n```\n" })
   ask()

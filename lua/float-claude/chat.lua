@@ -115,7 +115,7 @@ end
 local function transcript_keymaps(s, close)
   local function to_input()
     local ex = s.exchanges[#s.exchanges]
-    if ex and ex.done then
+    if not ex or ex.done then
       vim.api.nvim_set_current_win(s.iwin)
       vim.cmd("startinsert")
     end
