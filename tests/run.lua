@@ -1044,6 +1044,32 @@ test("the hide key hides the popup; the answer streams on; <leader>ai shows it a
     "following the newest line, back in the prompt")
 end)
 
+test("hide, come back and unfocus with a config like the author's (no mouse, Esc saves, scrolloff)", function()
+  setup()
+  -- From the author's Neovim config: options and mappings that touch these keys.
+  lua([[
+    vim.o.mouse = ""
+    vim.o.scrolloff = 16
+    vim.o.relativenumber = true
+    vim.keymap.set("n", "<Esc>", "<cmd>if &buftype == '' | w | endif<CR>", { desc = "Save" })
+    vim.keymap.set("n", "<C-a>", "ggVG")
+    for _, key in ipairs({ "<Up>", "<Down>", "<Left>", "<Right>" }) do vim.keymap.set({ "", "i" }, key, "") end
+  ]])
+  ask()
+  keys("hello<C-q>")
+  eq({ {}, 1000, "n" }, { floats(), lua("return vim.api.nvim_get_current_win()"), lua("return vim.fn.mode()") }, "hidden")
+  keys(" ai")
+  eq({ "float-claude", "i", { "hello" } }, lua("return { vim.bo.filetype, vim.fn.mode(), vim.api.nvim_buf_get_lines(0, 0, -1, false) }"),
+    "back in the prompt")
+  local before = floats()
+  keys("<C-o>")
+  eq({ 1000, "n" }, lua("return { vim.api.nvim_get_current_win(), vim.fn.mode() }"), "in the code")
+  keys("<Esc><C-w>v")
+  eq(before, floats(), "on screen after Esc in the code and a split")
+  keys(" ai<C-\\><C-n><C-w>w")
+  eq("float-claude-transcript", lua("return vim.bo.filetype"), "<C-w>w reaches the conversation")
+end)
+
 test("<leader>ai on a new selection starts a fresh chat in place of the open one", function()
   local log = setup({ "ANSWER\nok", "ANSWER\nfresh" })
   ask()
