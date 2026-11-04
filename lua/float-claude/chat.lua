@@ -202,7 +202,7 @@ function M.open(opts)
     vim.wo[win].scrolloff = 0
     vim.wo[win].sidescrolloff = 0
     vim.wo[win].fillchars = "eob: "
-    vim.wo[win].winhighlight = "Normal:FloatClaudeNormal,NormalNC:FloatClaudeNormal,NormalFloat:FloatClaudeNormal"
+    vim.wo[win].winhighlight = "Normal:FloatClaudeNormal,NormalNC:FloatClaudeNormal,NormalFloat:FloatClaudeNormal,FloatBorder:FloatClaudeNormal"
     return win
   end
 
@@ -323,8 +323,20 @@ function M.open(opts)
         right_gravity = false, -- keep the prefix left of text typed at column 0
       })
     end
-    -- The input's height is its rows once wrapped to the width, plus a padding row.
-    vim.api.nvim_win_set_config(s.iwin, { width = width })
+    -- The prompt wraps one column short of the popup's edge, like the
+    -- conversation: a 1-cell right border pads it. While the cursor sits after
+    -- a full last row, the window takes that cell so the cursor stays there.
+    local iwidth, pad = math.max(width - 1, 1), { "", "", "", " ", "", "", "", "" }
+    vim.api.nvim_win_set_config(s.iwin, { width = iwidth, border = pad })
+    vim.api.nvim_win_call(s.iwin, function()
+      local lnum, c = unpack(vim.api.nvim_win_get_cursor(0))
+      local endcol = c > 0 and c == #vim.api.nvim_get_current_line() and vim.fn.screenpos(0, lnum, c).endcol or 0
+      if endcol > 0 and endcol - vim.fn.win_screenpos(0)[2] + 1 == iwidth then
+        iwidth, pad = width, "none"
+        vim.api.nvim_win_set_config(0, { width = iwidth, border = pad })
+      end
+    end)
+    -- The input's height is its rows once wrapped, plus a padding row.
     local input_rows = vim.api.nvim_win_text_height(s.iwin, {}).all
     local ih = streaming() and 0 or input_rows + 1
     local bottom = vim.o.lines - vim.o.cmdheight - (vim.o.laststatus == 0 and 0 or 1)
@@ -354,7 +366,8 @@ function M.open(opts)
       relative = "editor",
       row = top + th,
       col = col,
-      width = width,
+      width = iwidth,
+      border = pad,
       height = math.max(ih, 1),
       hide = ih == 0,
     })

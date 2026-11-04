@@ -122,8 +122,11 @@ local function floats()
       if c.relative ~= "" and not c.hide then
         local pos = vim.api.nvim_win_get_position(win)
         local buf = vim.api.nvim_win_get_buf(win)
+        -- The width on screen: the prompt's right margin is a 1-cell border.
+        local right = c.border and c.border[4]
+        local margin = right and (type(right) == "table" and right[1] or right) ~= "" and 1 or 0
         out[vim.bo[buf].filetype] = {
-          row = pos[1], col = pos[2], width = c.width, height = c.height,
+          row = pos[1], col = pos[2], width = c.width + margin, height = c.height,
           lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false),
           top = vim.fn.line("w0", win),
         }
@@ -200,6 +203,21 @@ test("the popup has a fixed width; a long prompt wraps onto more rows", function
   eq({ f.row + 2, f.col + 5 }, lua("local p = vim.fn.screenpos(0, 1, 47) return { p.row, p.col }"), "wrapped text position")
   keys(string.rep(" word", 5))
   eq({ 50, 4 }, { floats()["float-claude"].width, floats()["float-claude"].height }, "words wrap too")
+end)
+
+test("the prompt wraps where the sent question does; the cursor stays inside the popup", function()
+  setup({ "ANSWER\nok" })
+  ask()
+  -- 45 cells fill a row: the prefix takes 4 and the last column is a margin.
+  keys(string.rep("x", 45))
+  eq(2, floats()["float-claude"].height, "a full row stays one row")
+  eq({ 1, 50 }, lua("return { vim.fn.winline(), vim.fn.wincol() }"), "cursor in the last column")
+  keys("y")
+  eq(3, floats()["float-claude"].height, "one more cell wraps")
+  eq({ 2, 6 }, lua("return { vim.fn.winline(), vim.fn.wincol() }"), "cursor after the wrapped text")
+  keys("<CR>")
+  wait("return answered(1)", "the answer")
+  eq({ "  ❯ " .. string.rep("x", 45), "    y" }, vim.list_slice(turns(), 1, 2), "same rows once sent")
 end)
 
 test("the width is a setup option, used by the conversation too", function()
