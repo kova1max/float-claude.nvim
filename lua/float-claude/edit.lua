@@ -8,9 +8,11 @@ local M = {}
 local ns = vim.api.nvim_create_namespace("float-claude-edit")
 local SPINNER = { "◐", "◓", "◑", "◒" }
 
----@param opts { buf: integer, win: integer, first: integer, last: integer, on_end: fun() }
+---@param opts { buf: integer, win: integer, first: integer, last: integer, on_end: fun(result: { old: integer, new: integer }?) }
 ---  `buf` must be modifiable.
----  `first`/`last` are the 1-based selected lines; `on_end` runs once the edit is over.
+---  `first`/`last` are the 1-based selected lines. `on_end` runs once the edit is
+---  over, with the old and new line counts when it was applied, or nil when it was
+---  cancelled or came back empty (the original lines are back in place then).
 function M.start(opts)
   local buf, first = opts.buf, opts.first
   local old_count = opts.last - first + 1
@@ -41,7 +43,6 @@ function M.start(opts)
         vim.api.nvim_buf_del_extmark(buf, ns, spinner_mark)
       end
     end
-    opts.on_end()
   end
 
   local function clear()
@@ -68,6 +69,10 @@ function M.start(opts)
     vim.api.nvim_buf_call(buf, function()
       if written > 0 then
         vim.cmd("undojoin")
+      else
+        -- Start a new undo block: an earlier edit from the same popup can still
+        -- be open, as nothing was typed in this buffer since.
+        vim.cmd("let &l:undolevels = &l:undolevels")
       end
       local row = first - 1 + written
       vim.api.nvim_buf_set_lines(buf, row, written == 0 and opts.last or row, false, { line })
@@ -77,6 +82,11 @@ function M.start(opts)
     vim.api.nvim_buf_set_extmark(buf, ns, first - 1 + written, 0, { line_hl_group = "FloatClaudeAdded" })
     written = written + 1
     draw_spinner()
+  end
+
+  ---How many lines the selected range holds right now.
+  function self.lines()
+    return written == 0 and old_count or written
   end
 
   ---Feed reply text (after the EDIT tag line); complete lines are written as they arrive.
@@ -102,6 +112,7 @@ function M.start(opts)
     finish_ui()
     if written == 0 then
       clear()
+      opts.on_end(nil)
       util.error("Claude returned no code")
       return
     end
@@ -111,8 +122,8 @@ function M.start(opts)
         vim.cmd("normal! ^")
       end)
     end
-    vim.api.nvim_echo({ { string.format("refactored %d → %d lines · u to undo", old_count, written) } }, true, {})
     vim.defer_fn(clear, 700)
+    opts.on_end({ old = old_count, new = written })
   end
 
   ---Stop and restore the original lines. `msg` is echoed as an error when given.
@@ -123,6 +134,7 @@ function M.start(opts)
     finish_ui()
     revert()
     clear()
+    opts.on_end(nil)
     if msg then
       util.error(msg)
     end
