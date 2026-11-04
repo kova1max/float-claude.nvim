@@ -44,7 +44,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `<CR>` | Popup | Send the prompt |
 | `<S-CR>` or `<C-j>` | Popup | New line in the prompt (use `<C-j>` if your terminal does not send Shift-Enter) |
 | `<C-u>` / `<C-d>`, mouse wheel, `<Up>` / `<Down>` | Popup | Scroll the conversation (in a multi-line prompt the arrows first move between its lines) |
-| `<Esc>` | Popup, or while an edit streams | Close and end the conversation; a half-written edit is undone |
+| `<Esc>` | Popup | Close and end the conversation; a half-written edit is undone |
 | `<C-q>` | Popup | Hide it; the conversation goes on in the background |
 | `<C-o>` | Popup | Back to the code; the popup stays on screen |
 | `<leader>yy` / `<leader>nn` | Popup, with `review_edits` | Accept / discard the edit shown as a diff |

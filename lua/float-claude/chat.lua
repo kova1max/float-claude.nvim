@@ -801,6 +801,18 @@ function M.open(opts)
     end,
   })
   vim.api.nvim_create_autocmd("BufWipeout", { group = group, buffer = s.buf, callback = close })
+  -- Unloaded (:bd); `:e!` also unloads it, but reloads it right away.
+  vim.api.nvim_create_autocmd("BufUnload", {
+    group = group,
+    buffer = s.buf,
+    callback = function()
+      vim.schedule(function()
+        if not vim.api.nvim_buf_is_loaded(s.buf) then
+          close()
+        end
+      end)
+    end,
+  })
 
   active = { focus = enter, close = close }
   -- Start the CLI now so its startup overlaps with typing the prompt.

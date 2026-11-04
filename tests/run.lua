@@ -645,6 +645,35 @@ test("leaving the popup while an edit streams: the edit finishes, the popup stay
   eq(3, #lua("return vim.api.nvim_list_wins()"), "still open")
 end)
 
+test("Esc in the code while an edit streams with the popup hidden leaves both alone", function()
+  setup({ "EDIT\n  a()\n  b()\n  c()\n" }, 150)
+  ask()
+  keys("go<CR>")
+  wait("return vim.api.nvim_buf_get_lines(1, 1, 2, false)[1] == '  a()'", "the first line")
+  keys("<C-q>")
+  eq({ 1000, {} }, { lua("return vim.api.nvim_get_current_win()"), floats() }, "hidden, in the code")
+  keys("<Esc>")
+  wait("return vim.tbl_contains(transcript(), '    refactored 5 → 3 lines · u to undo')", "the edit")
+  eq({ "function f(nums)", "  a()", "  b()", "  c()", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 5, false)"))
+  keys(" ai")
+  eq({ "float-claude", "i" }, lua("return { vim.bo.filetype, vim.fn.mode() }"), "the popup comes back")
+end)
+
+for _, review in ipairs({ false, true }) do
+  local what = review and "a diff waits" or "an edit streams"
+  test("unloading the source buffer while " .. what .. " ends the conversation", function()
+    setup({ "EDIT\n  a()\n" }, 300, { review_edits = review })
+    ask()
+    keys("go<CR>")
+    wait(review and "return reviewing()" or "return vim.tbl_contains(transcript(), '    refactoring…')", "the edit")
+    lua("vim.api.nvim_set_current_win(1000)")
+    lua("vim.cmd('bdelete! 1')")
+    lua("vim.wait(500)")
+    eq({ 1, false, "" }, { #lua("return vim.api.nvim_list_wins()"), lua("return vim.api.nvim_buf_is_loaded(1)"),
+      lua("return vim.v.errmsg") }, "closed, no errors")
+  end)
+end
+
 test("answer: the tag may share its line with the answer, split across deltas", function()
   setup({ { "ANS", "WER It loops", " twice.\nThen", " stops." }, "ANSWER Yes." })
   ask()

@@ -60,7 +60,6 @@ function M.start(opts)
     timer:close()
     if vim.api.nvim_buf_is_valid(buf) then
       vim.bo[buf].modifiable = not locked
-      pcall(vim.keymap.del, "n", "<Esc>", { buffer = buf })
       if spinner_mark then
         vim.api.nvim_buf_del_extmark(buf, ns, spinner_mark)
       end
@@ -285,9 +284,6 @@ function M.start(opts)
   })
 
   vim.bo[buf].modifiable = false
-  vim.keymap.set("n", "<Esc>", function()
-    self.cancel()
-  end, { buffer = buf, desc = "float-claude: cancel the edit" })
   draw_spinner()
   timer:start(130, 130, vim.schedule_wrap(function()
     if not ended then
