@@ -1025,8 +1025,11 @@ function M.open(opts)
     end,
   })
 
-  -- Send `text` as if typed in the prompt (ignored while a reply streams).
+  -- Send `text` as if typed in the prompt; while a reply streams, say so and leave the prompt alone.
   local function send(text)
+    if streaming() then
+      return util.error("a reply is still streaming")
+    end
     vim.api.nvim_buf_set_lines(s.ibuf, 0, -1, false, vim.split(text, "\n"))
     submit()
   end

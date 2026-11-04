@@ -1461,6 +1461,38 @@ test("actions: a key sends its prompt about the selection, in Normal mode the fu
   assert(msg:find("Selected lines 20-20:", 1, true), "outside a function: the line\n" .. msg)
 end)
 
+test("actions: in the popup while a reply streams, an action leaves the prompt alone and says so", function()
+  local log = setup({ "ANSWER\none\ntwo\nthree\nfour", "ANSWER\nok" }, 200)
+  ask()
+  keys("go<CR>")
+  wait("return vim.tbl_contains(transcript(), '    one')", "the reply streaming")
+  keys(" af")
+  eq({ "float-claude: a reply is still streaming", { "" } }, { last_message(),
+    lua([[for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.bo[b].filetype == "float-claude" then return vim.api.nvim_buf_get_lines(b, 0, -1, false) end
+    end]]) }, "the prompt stays empty")
+  wait("return answered(1)", "the answer")
+  eq(2, #sent(log), "nothing more sent")
+end)
+
+test("actions: one with filetypes is mapped and offered only in those buffers", function()
+  local log = setup({ "ANSWER\nok" }, 0, { actions = { todo = { key = "<leader>ao", prompt = "List the TODOs.", filetypes = { "markdown" } } } })
+  pick("nothing")
+  keys(":FloatClaude<CR>")
+  eq({ false, "", "" }, { vim.tbl_contains(lua("return listed"), "todo        <leader>ao"),
+    lua([[return vim.fn.maparg(" ao", "n")]]), lua([[return vim.fn.maparg(" ao", "x")]]) }, "not in a lua buffer")
+  lua([[vim.cmd.enew()
+    vim.api.nvim_buf_set_lines(0, 0, -1, false, { "# Notes", "", "- TODO: write" })
+    vim.bo.filetype = "markdown"]])
+  keys(":FloatClaude<CR>")
+  eq({ true, true }, { vim.tbl_contains(lua("return listed"), "todo        <leader>ao"),
+    lua([[return vim.fn.maparg(" ao", "n") ~= ""]]) }, "offered and mapped in a markdown buffer")
+  keys("3G ao")
+  wait("return answered(1)", "the answer")
+  local msg = sent(log)[2]
+  assert(msg:find("(filetype: markdown)", 1, true) and vim.endswith(msg, "Request: List the TODOs."), msg)
+end)
+
 test("actions: setup changes a key, adds an action and removes one (false)", function()
   local log = setup({ "ANSWER\nok" }, 0, {
     actions = { explain = { key = "<leader>aE" }, simplify = false, todo = { key = "<leader>ao", prompt = "List the TODOs." } },

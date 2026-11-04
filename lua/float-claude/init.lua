@@ -229,11 +229,31 @@ function M.setup(opts)
       M.ask()
     end, { desc = "float-claude: ask Claude" })
   end
+  local group = vim.api.nvim_create_augroup("float-claude", {})
   for name, action in pairs(config.actions) do
     if action and action.key then
-      vim.keymap.set({ "n", "x" }, action.key, function()
-        M.run(name)
-      end, { desc = "float-claude: " .. name })
+      local function map(buf)
+        vim.keymap.set({ "n", "x" }, action.key, function()
+          M.run(name)
+        end, { buffer = buf, desc = "float-claude: " .. name })
+      end
+      if action.filetypes then
+        -- Mapped only in buffers of those filetypes, open ones and later ones.
+        vim.api.nvim_create_autocmd("FileType", {
+          group = group,
+          pattern = action.filetypes,
+          callback = function(ev)
+            map(ev.buf)
+          end,
+        })
+        for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+          if vim.api.nvim_buf_is_loaded(buf) and vim.tbl_contains(action.filetypes, vim.bo[buf].filetype) then
+            map(buf)
+          end
+        end
+      else
+        map()
+      end
     end
   end
   vim.api.nvim_create_user_command("FloatClaude", function(cmd)
@@ -242,7 +262,7 @@ function M.setup(opts)
   restyle()
   -- A new colorscheme clears the groups, and "auto" follows it.
   vim.api.nvim_create_autocmd("ColorScheme", {
-    group = vim.api.nvim_create_augroup("float-claude", {}),
+    group = group,
     callback = restyle,
   })
   vim.api.nvim_create_user_command("FloatClaudeTheme", function(cmd)
