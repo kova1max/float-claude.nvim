@@ -1636,6 +1636,14 @@ test("@ mentions: a file, an open buffer as it is now and @diagnostics are sent 
     "",
   }, turns(), "the mentions listed under the question")
   keys("<Esc>q")
+  log = setup({ "ANSWER\nok" }, 0)
+  lua(DIAGNOSTICS)
+  ask()
+  keys("@diagnostics fix these<CR>")
+  wait("return answered(1)", "the answer")
+  msg = sent(log)[2]
+  assert(msg:find("Mentioned in the request (with @):\n@diagnostics, those of [No Name] (3 diagnostics):", 1, true), msg)
+  keys("<Esc>q")
   log = setup({ "ANSWER\nok" }, 0, { mentions = false })
   ask()
   eq("", lua("return vim.bo.omnifunc"), "no completion")

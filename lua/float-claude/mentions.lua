@@ -109,7 +109,7 @@ end
 ---@param opts { max_lines: integer } the `mentions` option
 function M.expand(text, buf, opts)
   local out, seen = {}, {}
-  for name in text:gmatch("%f[%S]@(%S+)") do
+  for name in (" " .. text):gmatch("%s@(%S+)") do
     -- "see @a.lua." mentions a.lua.
     local m = resolve(name, buf, opts.max_lines)
     local bare = name:gsub("[%.,;:!?%)%]}'\"`]+$", "")
