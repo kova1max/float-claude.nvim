@@ -102,7 +102,7 @@ local function resolve(name, buf, max)
   }
 end
 
----What `text` mentions with @ (an @ at its start or after a space), each once,
+---What `text` mentions with @ (an @ at its start or after whitespace), each once,
 ---in order: { label (for the conversation), text (for the message) }. A
 ---mention that names nothing is left as it is, plain text.
 ---@param buf integer the chat's buffer, the one @diagnostics is about
