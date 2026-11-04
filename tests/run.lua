@@ -96,6 +96,28 @@ local function setup(replies, delay, opts)
       end
       return done >= n and vim.bo.filetype == "float-claude"
     end
+    -- The review diff in buffer 1: rows of removed lines, and the virtual added
+    -- lines as { row, above, texts } (padding trimmed).
+    function _G.diff_view()
+      local out = { removed = {}, added = {} }
+      for _, m in ipairs(vim.api.nvim_buf_get_extmarks(1, -1, 0, -1, { details = true })) do
+        local d = m[4]
+        if d.hl_group == "FloatClaudeRemoved" then
+          table.insert(out.removed, m[2])
+        end
+        if d.virt_lines then
+          local texts = {}
+          for _, l in ipairs(d.virt_lines) do
+            table.insert(texts, (l[1][1]:gsub("%s+$", "")))
+          end
+          table.insert(out.added, { m[2], d.virt_lines_above or false, texts })
+        end
+      end
+      return out
+    end
+    function _G.reviewing()
+      return vim.iter(transcript()):any(function(l) return l:find("review", 1, true) ~= nil end)
+    end
     function _G.logged(n)
       return vim.fn.filereadable(vim.env.FAKE_CLAUDE_LOG) == 1 and #vim.fn.readfile(vim.env.FAKE_CLAUDE_LOG) >= n
     end
@@ -398,6 +420,78 @@ test("edit: a reply that is only the tag ends with an error and restores everyth
   eq({ true, 0, "n" }, { lua("return vim.bo.modifiable"), marks(), lua("return vim.fn.mode()") })
 end)
 
+test("review_edits: an edit shows as a diff until <leader>yy accepts it; one u undoes it", function()
+  setup({ "EDIT\n  for _, a in ipairs(nums) do\n    print(a)\n  end\n" }, 0, { review_edits = true })
+  ask()
+  keys("use ipairs<CR>")
+  wait("return reviewing()", "the diff")
+  eq(ORIGINAL, buffer(), "nothing written yet")
+  eq(false, lua("return vim.bo[1].modifiable"), "locked while the diff waits")
+  eq({ removed = { 1, 2, 3, 4 }, added = { { 4, false, { "  for _, a in ipairs(nums) do", "    print(a)" } } } },
+    lua("return diff_view()"), "removed lines and added lines")
+  eq({ "  ❯ use ipairs", "    review: 5 → 3 lines", "    <leader>yy accept · <leader>nn discard", "" }, turns())
+  eq({ "float-claude-transcript", "n" }, lua("return { vim.bo.filetype, vim.fn.mode() }"), "in the conversation")
+  keys(" yy")
+  eq({ "function f(nums)", "  for _, a in ipairs(nums) do", "    print(a)", "  end", "end", "-- 8", "-- 9" }, buffer())
+  eq({ "  ❯ use ipairs", "    refactored 5 → 3 lines · u to undo", "" }, turns())
+  eq({ "float-claude", "i", true }, lua("return { vim.bo.filetype, vim.fn.mode(), vim.bo[1].modifiable }"),
+    "back in the prompt, buffer unlocked")
+  eq({ removed = {}, added = {} }, lua("return diff_view()"), "diff gone")
+  keys("<Esc>u")
+  eq(ORIGINAL, buffer(), "after one undo")
+end)
+
+test("review_edits: the discard key (configurable) leaves the buffer as it was; Claude is told", function()
+  local log = setup({ "EDIT\n  a()\n", "ANSWER\nok" }, 0, { review_edits = true, discard_key = "<leader>d" })
+  local before = lua("return { vim.fn.changenr(), vim.bo.modified }")
+  ask()
+  keys("go<CR>")
+  wait("return reviewing()", "the diff")
+  keys(" d")
+  eq(ORIGINAL, buffer())
+  eq(before, lua("return { vim.api.nvim_buf_call(1, vim.fn.changenr), vim.bo[1].modified }"), "undo state and modified")
+  eq({ true, 1 }, { lua("return vim.bo[1].modifiable"), marks() }, "unlocked, only the selection highlight left")
+  eq({ "  ❯ go", "    edit discarded", "" }, turns())
+  eq({ "float-claude", "i" }, lua("return { vim.bo.filetype, vim.fn.mode() }"), "back in the prompt")
+  keys("and now?<CR>")
+  wait("return answered(2)", "the answer")
+  eq("(I discarded your last EDIT; the selected lines are unchanged.)\nand now?", sent(log)[3])
+end)
+
+test("review_edits: new lines stream into the diff; old lines not reached yet stay plain", function()
+  setup({ "EDIT\n  a()\n  b()\n" }, 300, { review_edits = true })
+  ask()
+  keys("go<CR>")
+  wait("return #diff_view().added > 0", "the first line")
+  eq({ removed = {}, added = { { 1, true, { "  a()" } } } }, lua("return diff_view()"), "while streaming")
+  eq(ORIGINAL, buffer(), "nothing written")
+  wait("return reviewing()", "the diff")
+  eq({ removed = { 1, 2, 3, 4, 5 }, added = { { 5, false, { "  a()", "  b()" } } } }, lua("return diff_view()"), "done")
+end)
+
+test("review_edits: closing the popup discards the diff", function()
+  setup({ "EDIT\n  a()\n" }, 0, { review_edits = true })
+  ask()
+  keys("go<CR>")
+  wait("return reviewing()", "the diff")
+  keys("<Esc>")
+  eq(ORIGINAL, buffer())
+  eq({ 1, 0, true, "n" }, { #lua("return vim.api.nvim_list_wins()"), marks(), lua("return vim.bo[1].modifiable"),
+    lua("return vim.fn.mode()") })
+end)
+
+test("review_edits: leaving the popup while the edit streams discards it", function()
+  setup({ "EDIT\n  a()\n  b()\n  c()\n" }, 150, { review_edits = true })
+  ask()
+  keys("go<CR>")
+  wait("return #diff_view().added > 0", "the first line")
+  lua("vim.api.nvim_set_current_win(1000)")
+  lua("")
+  eq({ 1, 0, true }, { #lua("return vim.api.nvim_list_wins()"), marks(), lua("return vim.bo[1].modifiable") })
+  lua("vim.wait(600)")
+  eq({ ORIGINAL, 0 }, { buffer(), marks() }, "nothing shown or written after leaving")
+end)
+
 test("answer: a screen narrower than the popup caps its width and still wraps", function()
   setup({ "ANSWER\nok then" })
   vim.rpcrequest(chan, "nvim_ui_try_resize", 12, 24) -- the narrowest Neovim allows
@@ -674,6 +768,7 @@ test("highlight groups can be overridden", function()
   eq(0x3fb5c9, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudePrompt" }).fg]]), "prompt fg")
   eq(0x8a8a8a, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudeHistory" }).fg]]), "history fg")
   eq(0x12301f, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudeAdded" }).bg]]), "added bg")
+  eq(0x3a1d22, lua([[return vim.api.nvim_get_hl(0, { name = "FloatClaudeRemoved" }).bg]]), "removed bg")
 end)
 
 if failures > 0 then

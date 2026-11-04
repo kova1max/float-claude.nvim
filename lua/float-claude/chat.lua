@@ -20,6 +20,7 @@ local function set_highlights()
   vim.api.nvim_set_hl(0, "FloatClaudeHeader", { default = true, fg = "#4e4e55" })
   vim.api.nvim_set_hl(0, "FloatClaudeSelection", { default = true, link = "Visual" })
   vim.api.nvim_set_hl(0, "FloatClaudeAdded", { default = true, bg = "#12301f" })
+  vim.api.nvim_set_hl(0, "FloatClaudeRemoved", { default = true, bg = "#3a1d22" })
 end
 
 local function width_of(s)
@@ -146,10 +147,12 @@ local function header(s, width)
 end
 
 ---Open the popup for lines `first`..`last` of the current window's buffer.
----@param opts { first: integer, last: integer, selected: boolean, cmd: string[], width: integer, placement: string }
+---@param opts { first: integer, last: integer, selected: boolean, cmd: string[], width: integer, placement: string, review_edits: boolean, accept_key: string, discard_key: string }
 ---  `selected` is true when the lines come from a Visual selection; they stay
 ---  highlighted while the popup is open. `placement` is "top-right" (pinned to
 ---  the editor's top-right corner) or "cursor" (1 row below, 3 columns right of it).
+---  With `review_edits`, an edit shows as a diff until `accept_key` or
+---  `discard_key` is pressed in the popup.
 function M.open(opts)
   set_highlights()
   local s = {
@@ -164,7 +167,7 @@ function M.open(opts)
   }
 
   local closed = false
-  local proc, editing, spin_timer
+  local proc, editing, reviewing, spin_timer -- reviewing: the edit whose diff waits for a decision
   local close
 
   -- Screen cell of the cursor (0-based), for the "cursor" placement.
@@ -467,8 +470,12 @@ function M.open(opts)
       return
     end
     close_windows()
+    if reviewing then
+      reviewing.discard() -- nothing is applied without a decision
+      reviewing = nil
+    end
     if editing then
-      if not refocus then
+      if not refocus and not opts.review_edits then
         return
       end
       editing.cancel()
@@ -494,10 +501,12 @@ function M.open(opts)
     end
   end
 
-  -- The edit is over: `result` has the line counts when it was applied.
+  -- The edit is over: `result` has the line counts when it was applied, also
+  -- `pending` while its diff waits for a decision, or is `{ discarded = true }`.
   local function end_edit(ex, result)
-    editing = nil
-    local note = result and string.format("refactored %d → %d lines · u to undo", result.old, result.new)
+    local handle = editing
+    editing, reviewing = nil, nil
+    local note = result and result.old and string.format("refactored %d → %d lines · u to undo", result.old, result.new)
     if closed then -- the user left while it streamed
       clear_selection()
       proc.stop()
@@ -509,11 +518,23 @@ function M.open(opts)
     if not result then
       return close(true)
     end
-    -- Follow-ups work on the new lines.
-    s.last = s.first + result.new - 1
-    s.cursor = vim.api.nvim_win_get_cursor(s.win)
-    clear_selection()
-    set_selection()
+    if result.pending then
+      reviewing = handle
+      ex.note = string.format("review: %d → %d lines\n%s accept · %s discard", result.old, result.new,
+        opts.accept_key, opts.discard_key)
+      stop_spinner()
+      return layout()
+    end
+    if result.discarded then
+      s.discarded = true -- Claude is told with the next message
+      note = "edit discarded"
+    else
+      -- Follow-ups work on the new lines.
+      s.last = s.first + result.new - 1
+      s.cursor = vim.api.nvim_win_get_cursor(s.win)
+      clear_selection()
+      set_selection()
+    end
     ex.note = note
     ex.done = true
     stop_spinner()
@@ -534,6 +555,7 @@ function M.open(opts)
       win = s.win,
       first = s.first,
       last = s.last,
+      review = opts.review_edits,
       on_end = function(result)
         end_edit(ex, result)
       end,
@@ -606,6 +628,10 @@ function M.open(opts)
       return
     end
     local message = #s.exchanges == 0 and first_message(s, text) or text
+    if s.discarded then
+      message = "(I discarded your last EDIT; the selected lines are unchanged.)\n" .. message
+      s.discarded = false
+    end
     table.insert(s.exchanges, { q = text, a = "", done = false })
     reply, tag = "", nil
     s.follow = true
@@ -687,6 +713,16 @@ function M.open(opts)
     end,
   })
   transcript_keymaps(s, close)
+  if opts.review_edits then
+    -- While a diff waits the cursor sits in the conversation, in Normal mode.
+    for key, accept in pairs({ [opts.accept_key] = true, [opts.discard_key] = false }) do
+      vim.keymap.set("n", key, function()
+        if reviewing then
+          end_edit(s.exchanges[#s.exchanges], accept and reviewing.accept() or reviewing.discard())
+        end
+      end, { buffer = s.tbuf, desc = accept and "float-claude: accept the edit" or "float-claude: discard the edit" })
+    end
+  end
 
   vim.api.nvim_create_autocmd(
     { "TextChanged", "TextChangedI", "TextChangedP" },

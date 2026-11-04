@@ -10,6 +10,11 @@ local config = {
   -- Where the popup opens: "top-right" (pinned to the editor's top-right corner)
   -- or "cursor" (1 row below and 3 columns right of the cursor).
   placement = "top-right",
+  -- Show an edit as an inline diff in the buffer and apply it only once accepted.
+  review_edits = false,
+  -- With review_edits: the keys, in the popup, that accept or discard the diff.
+  accept_key = "<leader>yy",
+  discard_key = "<leader>nn",
 }
 
 ---Open the popup for the selected lines (Visual mode) or the current line (Normal mode).
@@ -28,6 +33,9 @@ function M.ask()
     cmd = config.cmd,
     width = config.width,
     placement = config.placement,
+    review_edits = config.review_edits,
+    accept_key = config.accept_key,
+    discard_key = config.discard_key,
   })
 end
 

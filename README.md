@@ -45,12 +45,22 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `<S-CR>` or `<C-j>` | Popup | New line in the prompt (use `<C-j>` if your terminal does not send Shift-Enter) |
 | `<C-u>` / `<C-d>`, mouse wheel, `<Up>` / `<Down>` | Popup | Scroll the conversation (in a multi-line prompt the arrows first move between its lines) |
 | `<Esc>` | Popup, or while an edit streams | Close and cancel the request; a half-written edit is undone |
+| `<leader>yy` / `<leader>nn` | Popup, with `review_edits` | Accept / discard the edit shown as a diff |
 
 The popup has a fixed width (see `width` below) and grows downwards with the conversation; a longer prompt or answer wraps onto more rows, never scrolling sideways.
 
 The conversation scrolls like a chat: once it no longer fits, each new question moves to the top of the popup and the answer streams in below it, following the newest line. Scroll back and the view stays put while the answer streams and while you type the next prompt; scroll down again to follow. The history is read-only. While a reply streams, the cursor sits in the conversation, so Normal-mode motions scroll it too; `<Esc>` or `q` closes. With `mouse` off (as with hardtime.nvim), most terminals send the wheel as arrow keys, so the wheel still scrolls.
 
 Leaving the popup (focusing another window) closes it and cancels an answer; an edit that is already streaming finishes in the buffer.
+
+### Reviewing edits
+
+With `review_edits = true`, an edit is not applied straight away. It shows as an inline diff in the buffer: the removed lines turn red and the new lines stream in as green virtual lines (without syntax highlighting) under them. The buffer stays untouched and locked until you decide in the popup:
+
+- `<leader>yy` accepts: the new lines are written, and one `u` brings back the original.
+- `<leader>nn` discards: the buffer is exactly as before, and Claude is told with your next message.
+
+The popup stays open either way, so you can keep asking. Closing or leaving the popup before deciding discards the edit.
 
 Claude gets the file name and filetype, the selected lines, and up to 40 lines around them. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
 
@@ -64,6 +74,9 @@ require("float-claude").setup({
   cmd = { "claude" }, -- the CLI, with extra arguments if you like, e.g. { "claude", "--model", "sonnet" }
   width = 50, -- popup width in columns, capped to the screen; longer lines wrap
   placement = "top-right", -- or "cursor": the popup's top-left corner 1 row below and 3 columns right of the cursor
+  review_edits = false, -- true: show an edit as a diff and apply it only once accepted
+  accept_key = "<leader>yy", -- with review_edits: accept the diff (Normal mode, in the popup)
+  discard_key = "<leader>nn", -- with review_edits: discard it
 })
 ```
 
@@ -76,7 +89,8 @@ Colors come from highlight groups defined with `default = true`, so a colorschem
 | `FloatClaudeHistory` | `fg = #8a8a8a` | sent questions, spinners, `refactoring…`, edit notes |
 | `FloatClaudeHeader` | `fg = #4e4e55` | the file and lines header |
 | `FloatClaudeSelection` | links to `Visual` | the selected lines while the popup or an edit is active |
-| `FloatClaudeAdded` | `bg = #12301f` | freshly written lines |
+| `FloatClaudeAdded` | `bg = #12301f` | freshly written lines, added lines in a review diff |
+| `FloatClaudeRemoved` | `bg = #3a1d22` | removed lines in a review diff |
 
 ## Development
 
