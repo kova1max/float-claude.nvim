@@ -111,6 +111,14 @@ function M.start(opts)
           virt_lines = lines,
           virt_lines_above = after == 0,
         })
+        if after == 0 and first == 1 and vim.api.nvim_win_is_valid(opts.win) and vim.api.nvim_win_get_buf(opts.win) == buf then
+          -- Lines above line 1 show only as the window's top filler.
+          vim.api.nvim_win_call(opts.win, function()
+            if vim.fn.line("w0") == 1 then
+              vim.fn.winrestview({ topfill = #lines })
+            end
+          end)
+        end
       end
     end
   end

@@ -469,6 +469,25 @@ test("review_edits: new lines stream into the diff; old lines not reached yet st
   eq({ removed = { 1, 2, 3, 4, 5 }, added = { { 5, false, { "  a()", "  b()" } } } }, lua("return diff_view()"), "done")
 end)
 
+test("review_edits: lines added above buffer line 1 show on screen", function()
+  setup({ "EDIT\n-- header\nfunction f(nums)\n  for i = 1, #nums do\n    for j = i + 1, #nums do\n" }, 0,
+    { review_edits = true })
+  keys("1GV2j ai")
+  keys("add a header<CR>")
+  wait("return reviewing()", "the diff")
+  eq({ removed = {}, added = { { 0, true, { "-- header" } } } }, lua("return diff_view()"), "the added line")
+  eq({ "-- header", "function f(nums)" }, lua([[
+    vim.cmd.redraw()
+    local rows = {}
+    for row = 1, 2 do
+      local s = ""
+      for col = 5, 20 do s = s .. vim.fn.screenstring(row, col) end
+      table.insert(rows, vim.trim(s))
+    end
+    return rows
+  ]]), "screen rows 1-2")
+end)
+
 test("review_edits: closing the popup discards the diff", function()
   setup({ "EDIT\n  a()\n" }, 0, { review_edits = true })
   ask()
