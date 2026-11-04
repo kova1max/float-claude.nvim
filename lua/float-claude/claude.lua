@@ -29,17 +29,29 @@ local ARGS = {
   "--no-session-persistence",
 }
 
+-- Model aliases offered for completion; any model name the CLI takes works.
+M.models = { "opus", "sonnet", "haiku", "fable" }
+M.efforts = { "low", "medium", "high", "xhigh", "max" }
+
 ---@class float-claude.Process
 ---@field send fun(text: string)
+---@field control fun(request: table, done: fun(err: string?))
 ---@field stop fun()
 
 ---Start the CLI. Callbacks run on the main loop. `instructions` are the user's
----own, added after the built-in system prompt.
----@param opts { cmd: string[], instructions: string?, on_delta: fun(text: string), on_done: fun(), on_error: fun(msg: string) }
+---own, added after the built-in system prompt. `on_model` gets the model the
+---CLI reports it runs.
+---@param opts { cmd: string[], model: string?, effort: string?, instructions: string?, on_delta: fun(text: string), on_done: fun(), on_error: fun(msg: string), on_model: fun(model: string)? }
 ---@return float-claude.Process? process
 ---@return string? err
 function M.start(opts)
   local cmd = vim.list_extend(vim.deepcopy(opts.cmd), ARGS)
+  if opts.model then
+    vim.list_extend(cmd, { "--model", opts.model })
+  end
+  if opts.effort then
+    vim.list_extend(cmd, { "--effort", opts.effort })
+  end
   local system_prompt = M.system_prompt
   if opts.instructions then
     system_prompt = system_prompt
@@ -50,6 +62,22 @@ function M.start(opts)
 
   local stopped, busy, failed = false, false, false
   local pending, stderr = "", ""
+  -- Control requests go one at a time, so they take effect in the order sent:
+  -- `queue` holds the ones waiting, the first in flight.
+  local queue, next_id, proc = {}, 0, nil
+
+  local function write(msg)
+    proc:write(vim.json.encode(msg) .. "\n")
+  end
+
+  local function send_control()
+    local c = queue[1]
+    if c and not c.id then
+      next_id = next_id + 1
+      c.id = "float-claude-" .. next_id
+      write({ type = "control_request", request_id = c.id, request = c.request })
+    end
+  end
 
   local function fail(msg)
     if not failed and not stopped then
@@ -68,6 +96,16 @@ function M.start(opts)
       if e.type == "content_block_delta" and e.delta.type == "text_delta" then
         opts.on_delta(e.delta.text)
       end
+    elseif event.type == "system" and event.subtype == "init" and opts.on_model and type(event.model) == "string" then
+      opts.on_model(event.model)
+    elseif event.type == "control_response" then
+      local r = event.response or {}
+      local c = queue[1]
+      if c and r.request_id == c.id then
+        table.remove(queue, 1)
+        c.done(r.subtype ~= "success" and (r.error or "the CLI refused it") or nil)
+        send_control()
+      end
     elseif event.type == "result" then
       busy = false
       if event.is_error then
@@ -78,7 +116,8 @@ function M.start(opts)
     end
   end
 
-  local ok, proc = pcall(vim.system, cmd, {
+  local ok
+  ok, proc = pcall(vim.system, cmd, {
     stdin = true,
     stdout = function(_, data)
       if data then
@@ -112,7 +151,13 @@ function M.start(opts)
   return {
     send = function(text)
       busy = true
-      proc:write(vim.json.encode({ type = "user", message = { role = "user", content = text } }) .. "\n")
+      write({ type = "user", message = { role = "user", content = text } })
+    end,
+    -- A control request to the running CLI (e.g. set_model); `done` gets nil
+    -- once it took effect, or the error.
+    control = function(request, done)
+      table.insert(queue, { request = request, done = done })
+      send_control()
     end,
     stop = function()
       if not stopped then

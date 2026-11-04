@@ -11,6 +11,22 @@ function M.error(msg)
   vim.api.nvim_echo({ { text, "ErrorMsg" } }, true, {})
 end
 
+---The diagnostics of `buf` (those on lines `first`..`last` when given), in
+---line order, each as "- line 4: warning: message (source)".
+function M.diagnostics(buf, first, last)
+  local diags = vim.tbl_filter(function(d)
+    return not first or (d.lnum + 1 <= last and (d.end_lnum or d.lnum) + 1 >= first)
+  end, vim.diagnostic.get(buf))
+  table.sort(diags, function(a, b)
+    return a.lnum < b.lnum
+  end)
+  return vim.tbl_map(function(d)
+    local severity = ({ "error", "warning", "info", "hint" })[d.severity] or "info"
+    local source = d.source and " (" .. d.source .. ")" or ""
+    return string.format("- line %d: %s: %s%s", d.lnum + 1, severity, (d.message:gsub("%s*\n%s*", " ")), source)
+  end, diags)
+end
+
 ---`line` with its tabs replaced by the spaces they show as.
 function M.expand_tabs(line, tabstop)
   local i = line:find("\t", 1, true)

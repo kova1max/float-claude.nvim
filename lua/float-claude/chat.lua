@@ -4,6 +4,7 @@ local answer = require("float-claude.answer")
 local claude = require("float-claude.claude")
 local edit = require("float-claude.edit")
 local lsp = require("float-claude.lsp")
+local mentions = require("float-claude.mentions")
 local theme = require("float-claude.theme")
 local util = require("float-claude.util")
 
@@ -81,8 +82,9 @@ end
 -- The request with the selected lines and their context as they are now. A
 -- follow-up starts with what happened to the code since Claude's last reply
 -- (s.log) and the list of Claude's edits applied so far (s.edits); the
--- context, if unchanged since the last message, is not sent again.
-local function message(s, prompt, followup)
+-- context, if unchanged since the last message, is not sent again. `mentioned`
+-- is what the request names with @ (see mentions.lua).
+local function message(s, prompt, followup, mentioned)
   local buf = s.buf
   local name = vim.api.nvim_buf_get_name(buf)
   name = name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":~:.")
@@ -123,23 +125,20 @@ local function message(s, prompt, followup)
     "</selection>",
   })
   if s.diagnostics then
-    local diags = vim.tbl_filter(function(d)
-      return d.lnum + 1 <= s.last and (d.end_lnum or d.lnum) + 1 >= s.first
-    end, vim.diagnostic.get(buf))
-    table.sort(diags, function(a, b)
-      return a.lnum < b.lnum
-    end)
+    local diags = util.diagnostics(buf, s.first, s.last)
     if #diags > 0 then
       table.insert(out, "Diagnostics in the selected lines:")
-      for _, d in ipairs(diags) do
-        local severity = ({ "error", "warning", "info", "hint" })[d.severity] or "info"
-        local source = d.source and " (" .. d.source .. ")" or ""
-        table.insert(out, string.format("- line %d: %s: %s%s", d.lnum + 1, severity, (d.message:gsub("%s*\n%s*", " ")), source))
-      end
+      vim.list_extend(out, diags)
     elseif s.sent_diagnostics then
       table.insert(out, "Diagnostics in the selected lines: none now.")
     end
     s.sent_diagnostics = #diags > 0
+  end
+  if #mentioned > 0 then
+    table.insert(out, "Mentioned in the request (with @):")
+    vim.list_extend(out, vim.tbl_map(function(m)
+      return m.text
+    end, mentioned))
   end
   table.insert(out, "Request: " .. prompt)
   return table.concat(out, "\n")
@@ -213,16 +212,23 @@ local function transcript_keymaps(s, opts, close, on_link)
   map(s.tbuf, "n", opts.line_down_key, "<C-e>")
 end
 
--- "test.js · L7–13 · 7 lines", or "test.js · L7" for a single line.
+-- "test.js · L7–13 · 7 lines", or "test.js · L7" for a single line, then the
+-- chat's model (as chosen, else as the CLI reports it) and effort, if known.
 local function header(s, width)
   local name = vim.api.nvim_buf_get_name(s.buf)
   name = name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":t")
   local text = s.first == s.last and string.format("%s · L%d", name, s.first)
     or string.format("%s · L%d–%d · %d lines", name, s.first, s.last, s.last - s.first + 1)
-  while width_of(text) > width and vim.fn.strchars(text) > 1 do -- too long: cut the end
+  local tail = ""
+  for _, part in ipairs({ s.model or s.reported or false, s.effort or false }) do
+    if part then
+      tail = tail .. " · " .. part
+    end
+  end
+  while width_of(text .. tail) > width and vim.fn.strchars(text) > 1 do -- too long: cut the file part's end
     text = vim.fn.strcharpart(text, 0, vim.fn.strchars(text) - 2) .. "…"
   end
-  return text
+  return text .. tail
 end
 
 ---Open the popup for lines `first`..`last` of the current window's buffer.
@@ -246,7 +252,10 @@ function M.open(opts)
     last = opts.last,
     context_lines = opts.context_lines,
     diagnostics = opts.diagnostics,
-    exchanges = {}, -- { q = string, a = string, done = boolean, edit = boolean?, note = string? }
+    model = opts.model or nil, -- as chosen; `reported` is what the CLI says it runs
+    effort = opts.effort or nil,
+    -- { q = string, a = string, done = boolean, edit = boolean?, note = string?, mentions = string[]? }
+    exchanges = {},
     follow = true,
     frame = 1,
     hidden = false,
@@ -407,6 +416,11 @@ function M.open(opts)
       ex.line = #lines + 1
       for i, l in ipairs(answer.wrap(ex.q, text_width)) do
         add((i == 1 and "  ❯ " or "    ") .. l, "FloatClaudeHistory")
+      end
+      if ex.mentions then -- what the @ mentions sent
+        for _, l in ipairs(answer.wrap("+ " .. table.concat(ex.mentions, ", "), text_width)) do
+          add("    " .. l, "FloatClaudeHistory")
+        end
       end
       if ex.edit then -- the spinner rides on the lines being written
         for _, l in ipairs(answer.wrap(ex.note or "refactoring…", text_width)) do
@@ -830,9 +844,17 @@ function M.open(opts)
     end
     sync_selection()
     note_hand_changes()
-    local msg = message(s, text, #s.exchanges > 0)
+    local mentioned = opts.mentions and mentions.expand(text, s.buf, opts.mentions) or {}
+    local msg = message(s, text, #s.exchanges > 0, mentioned)
     s.log = {}
-    table.insert(s.exchanges, { q = text, a = "", done = false })
+    table.insert(s.exchanges, {
+      q = text,
+      a = "",
+      done = false,
+      mentions = #mentioned > 0 and vim.tbl_map(function(m)
+        return m.label
+      end, mentioned) or nil,
+    })
     reply, tag = "", nil
     s.follow = true
     vim.api.nvim_buf_set_lines(s.ibuf, 0, -1, false, {})
@@ -867,7 +889,19 @@ function M.open(opts)
   local function imap(modes, lhs, rhs)
     map(s.ibuf, modes, lhs, rhs)
   end
-  imap({ "i", "n" }, opts.submit_key, submit)
+  -- Keys the completion menu (of @ mentions) takes while an item in it is
+  -- selected, or for <Up>/<Down> while it shows.
+  local function menu_key(lhs, selected)
+    if vim.fn.pumvisible() == 1 and (not selected or vim.fn.complete_info({ "selected" }).selected ~= -1) then
+      vim.api.nvim_feedkeys(vim.keycode(lhs), "n", false)
+      return true
+    end
+  end
+  imap({ "i", "n" }, opts.submit_key, function()
+    if not menu_key("<C-y>", true) then
+      submit()
+    end
+  end)
   for _, lhs in ipairs(opts.newline_keys or {}) do
     imap("i", lhs, "<CR>")
   end
@@ -889,12 +923,18 @@ function M.open(opts)
   -- With 'mouse' off, terminals send the wheel as arrow keys. They move between
   -- the prompt's lines, and past the first or last one scroll the conversation.
   imap({ "i", "n" }, opts.line_up_key, function()
+    if menu_key("<Up>") then
+      return
+    end
     if vim.fn.line(".") > 1 then
       return vim.api.nvim_feedkeys(vim.keycode("<Up>"), "n", false)
     end
     scroll("<C-y>")
   end)
   imap({ "i", "n" }, opts.line_down_key, function()
+    if menu_key("<Down>") then
+      return
+    end
     if vim.fn.line(".") < vim.fn.line("$") then
       return vim.api.nvim_feedkeys(vim.keycode("<Down>"), "n", false)
     end
@@ -1002,6 +1042,9 @@ function M.open(opts)
     { "TextChanged", "TextChangedI", "TextChangedP" },
     { group = group, buffer = s.ibuf, callback = layout }
   )
+  if opts.mentions then
+    mentions.attach(s.ibuf, group)
+  end
   -- Closed some other way (:q, :only): the conversation ends.
   vim.api.nvim_create_autocmd("WinClosed", {
     group = group,
@@ -1055,15 +1098,47 @@ function M.open(opts)
         vim.api.nvim_win_set_hl_ns(win, theme_ns)
       end
     end,
+    -- The chat's model and effort (nil: the CLI's default), and switching them
+    -- for the next message: the running CLI is told, so the conversation goes on.
+    model = function()
+      return s.model or s.reported
+    end,
+    effort = function()
+      return s.effort
+    end,
+    set_model = function(name)
+      proc.control({ subtype = "set_model", model = name }, function(err)
+        if err then
+          return util.error(string.format("model %s: %s", name, err))
+        end
+        s.model = name
+        layout()
+      end)
+    end,
+    set_effort = function(level)
+      proc.control({ subtype = "apply_flag_settings", settings = { effortLevel = level } }, function(err)
+        if err then
+          return util.error(string.format("effort %s: %s", level, err))
+        end
+        s.effort = level
+        layout()
+      end)
+    end,
   }
   -- Start the CLI now so its startup overlaps with typing the prompt.
   local err
   proc, err = claude.start({
     cmd = opts.cmd,
+    model = s.model,
+    effort = s.effort,
     instructions = instructions(opts, s.buf),
     on_delta = on_delta,
     on_done = on_done,
     on_error = fail,
+    on_model = function(model)
+      s.reported = model:gsub("^claude%-", "") -- "claude-opus-5-5": "opus-5-5"
+      layout()
+    end,
   })
   if not proc then
     return fail(err)
@@ -1087,8 +1162,9 @@ function M.focus()
   return true
 end
 
----The open popup, if any: send(text) as a prompt, hide(), hidden(), and
----source() for the buffer and lines its conversation is about.
+---The open popup, if any: send(text) as a prompt, hide(), hidden(), source()
+---for the buffer and lines its conversation is about, and model(), effort(),
+---set_model(name), set_effort(level).
 function M.current()
   return active
 end

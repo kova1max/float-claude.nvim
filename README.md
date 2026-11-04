@@ -51,7 +51,9 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `<leader>yy` / `<leader>nn` | Popup, with `review_edits` | Accept / discard the edit shown as a diff |
 | `<CR>` or a click / `K` | Conversation, on an underlined name | Jump to its definition in the code window / show its hover (see below) |
 | `<leader>ae`, `<leader>af`, ... | Normal, Visual, popup | One-key actions: send a ready-made prompt (see [Actions](#actions)) |
-| `:FloatClaude` | Normal, Visual | Pick an action, open or hide the popup, or switch its theme from a list |
+| `@` | Popup | Mention a file, an open buffer or `@diagnostics` to send it too, with completion (see [Mentions](#mentions)) |
+| `:FloatClaude` | Normal, Visual | Pick an action, open or hide the popup, or switch its theme, model or effort from a list |
+| `:FloatClaudeModel`, `:FloatClaudeEffort` | Anywhere | Switch the open chat's model or effort (see [Model and effort](#model-and-effort)) |
 
 Every key above is a setup option (see [Configuration](#configuration)).
 
@@ -103,7 +105,36 @@ opts = {
 
 An action is `{ key, prompt }` (`key = false`: no mapping, still in `:FloatClaude`), plus `prose = true` to offer it for prose and comments instead of code, or `filetypes = { ... }` to offer it only in those filetypes: its key is then mapped only in buffers of those filetypes (and in the popup of a chat about one), and `:FloatClaude` lists it only there.
 
-`:FloatClaude` lists the actions offered for the current buffer with their keys, plus opening the popup (or going back to the open one), hiding it, and switching its theme, through `vim.ui.select` (so a picker plugin that replaces it, like telescope or snacks, shows it). From Visual mode (`:'<,'>FloatClaude`) the pick works on the selection; otherwise it does what its key does in Normal mode.
+`:FloatClaude` lists the actions offered for the current buffer with their keys, plus opening the popup (or going back to the open one), hiding it, switching its theme, and with a chat open, switching its model and effort, through `vim.ui.select` (so a picker plugin that replaces it, like telescope or snacks, shows it). From Visual mode (`:'<,'>FloatClaude`) the pick works on the selection; otherwise it does what its key does in Normal mode.
+
+### Mentions
+
+Type `@` in the prompt to send more than the selection with the message:
+
+- `@diagnostics`: all diagnostics of the file, not only those in the selected lines;
+- `@<buffer>`: an open buffer, by its path (or just its file name, when no other open buffer has it), with its text as it is now, unsaved changes included;
+- `@<path>`: any other file, relative to the current directory (`:pwd`), read from disk.
+
+```
+  demo.lua · L2–6 · 5 lines
+  ❯ does f match how @lua/api.lua calls it?
+    + lua/api.lua (120 lines)
+    Yes: `api.run` passes a list, as `f` expects.
+```
+
+The conversation lists what each message sent, under the question. A mention sends at most 500 lines (`mentions.max_lines`); a longer file or buffer sends its first 500 lines, and Claude is told the rest was not sent. A binary file is not sent. An `@` that names nothing (`@property`, `@nothing`) stays plain text, and so does one inside a word (`me@example.com`); punctuation right after a mention (`see @a.lua.`) is not part of it.
+
+Typing `@` opens the built-in completion menu: `diagnostics`, the open buffers, then the files and directories in the current directory (a directory completes on to its files). It narrows as you type; `<C-n>` / `<C-p>` (or `<Down>` / `<Up>`) pick an item and `<CR>` takes it, while `<CR>` with nothing picked sends the prompt. No completion plugin is needed. On Neovim 0.10 the menu opens as you type only when your `completeopt` has `noselect` or `noinsert` (else press `<C-x><C-o>`); from 0.11 the popup sets its own. `mentions = false` turns mentions off.
+
+### Model and effort
+
+Each chat starts with the `model` and `effort` from setup (by default the CLI's own), shown at the end of the header:
+
+```
+  demo.lua · L2–6 · 5 lines · sonnet · high
+```
+
+`:FloatClaudeModel <model>` switches the open chat's model (`opus`, `sonnet`, `haiku`, `fable`, or any model name the CLI takes; with completion), and `:FloatClaudeEffort <level>` its effort (`low`, `medium`, `high`, `xhigh`, `max`). Without an argument, or from `:FloatClaude`, they offer a list. The switch applies from the next message and the conversation goes on: the running `claude` process is told to switch, so nothing restarts and nothing is lost. A model the CLI refuses shows an error and the chat keeps its model. The next chat starts with the setup values again. Without a `model` set, the header shows the model the CLI reports once the first reply starts.
 
 ### Code in answers
 
@@ -122,7 +153,7 @@ The popup stays open either way, so you can keep asking. Hiding or leaving the p
 
 ### What Claude sees
 
-Claude gets the file name and filetype, the selected lines, up to 40 lines around them (`context_lines`), and the diagnostics in the selected lines (errors, warnings, ... from LSP or a linter, with their line, severity, message and source; `diagnostics = false` leaves them out). Each follow-up sends the diagnostics as they are then, so after an edit Claude sees whether the errors went away. Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
+Claude gets the file name and filetype, the selected lines, up to 40 lines around them (`context_lines`), and the diagnostics in the selected lines (errors, warnings, ... from LSP or a linter, with their line, severity, message and source; `diagnostics = false` leaves them out), plus whatever the message mentions with `@`. Each follow-up sends the diagnostics as they are then, so after an edit Claude sees whether the errors went away. Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
 
 Claude also remembers what it changed. Each follow-up starts with a short record of what happened since its last reply, as diffs rather than copies of the code:
 
@@ -189,7 +220,10 @@ Every option, with its default (`opts` for lazy.nvim, or `require("float-claude"
 ```lua
 {
   keymap = "<leader>ai", -- Visual + Normal mode: ask about the selection / back to the popup; false to map require("float-claude").ask yourself
-  cmd = { "claude" }, -- the CLI, with extra arguments if you like, e.g. { "claude", "--model", "sonnet" }
+  cmd = { "claude" }, -- the CLI, with extra arguments if you like
+  model = false, -- each chat's model to start with: "opus", "sonnet", "haiku", "fable" or a model name; false: the CLI's default
+  effort = false, -- each chat's effort to start with: "low", "medium", "high", "xhigh" or "max"; false: the CLI's default
+  mentions = { max_lines = 500 }, -- @ mentions in the prompt, each sending at most max_lines lines; false: off
   prompt = false, -- your instructions for every chat: a string, or function(ctx) returning one (see above)
   project_prompt = false, -- e.g. ".float-claude.md": that file, from the file's directory or above, is added
   context_lines = 40, -- unselected lines sent above and below the selection

@@ -174,7 +174,10 @@ local function sent(log)
   local out = {}
   for _, line in ipairs(vim.fn.readfile(log)) do
     local msg = vim.json.decode(line)
-    table.insert(out, msg.argv and "<start>" or msg.message.content)
+    local r = msg.request -- a control request: "<set_model opus>"
+    table.insert(out, msg.argv and "<start>"
+      or r and string.format("<%s %s>", r.subtype, r.model or vim.json.encode(r.settings))
+      or msg.message.content)
   end
   return out
 end
@@ -1575,6 +1578,165 @@ test("prose actions: reword edits a markdown paragraph in place; offered on comm
   wait("return answered(1)", "the answer")
   msg = sent(log)[2]
   assert(msg:find("Selected lines 8-40:", 1, true), "the comment block\n" .. msg)
+end)
+
+-- A temporary directory, the child's current directory, holding `files` ({ name = lines }).
+local function workdir(files)
+  local dir = vim.fn.tempname()
+  for name, lines in pairs(files) do
+    vim.fn.mkdir(vim.fs.dirname(dir .. "/" .. name), "p")
+    vim.fn.writefile(lines, dir .. "/" .. name)
+  end
+  lua("vim.cmd.cd(...)", dir)
+  return dir
+end
+
+test("@ mentions: a file, an open buffer as it is now and @diagnostics are sent and listed; mentions = false", function()
+  local log = setup({ "ANSWER\nok" }, 0, { mentions = { max_lines = 3 } })
+  workdir({ ["notes.txt"] = { "one", "two" }, ["big.txt"] = { "1", "2", "3", "4", "5" }, ["other.lua"] = { "on disk" } })
+  lua([[local b = vim.fn.bufadd("other.lua")
+    vim.fn.bufload(b)
+    vim.api.nvim_buf_set_lines(b, 0, -1, false, { "local x = 1 -- unsaved" })]])
+  lua(DIAGNOSTICS)
+  ask()
+  keys("see @notes.txt, @other.lua and @big.txt. @diagnostics @notes.txt; not @nothing or a@big.txt<CR>")
+  wait("return answered(1)", "the answer")
+  local msg = sent(log)[2]
+  local expected = table.concat({
+    "Mentioned in the request (with @):",
+    "@notes.txt: a file (2 lines):",
+    '<mention name="notes.txt">',
+    "one",
+    "two",
+    "</mention>",
+    "@other.lua: an open buffer, its text as it is now (1 line):",
+    '<mention name="other.lua">',
+    "local x = 1 -- unsaved",
+    "</mention>",
+    "@big.txt: a file (first 3 lines; the rest was not sent):",
+    '<mention name="big.txt">',
+    "1",
+    "2",
+    "3",
+    "</mention>",
+    "@diagnostics, those of [No Name] (3 diagnostics):",
+    "- line 2: error: unused loop variable",
+    "- line 4: warning: undefined global print (lua_ls)",
+    "- line 21: error: far away",
+    "Request: see @notes.txt",
+  }, "\n")
+  assert(msg:find(expected, 1, true), msg)
+  eq({
+    "  ❯ see @notes.txt, @other.lua and @big.txt.",
+    "    @diagnostics @notes.txt; not @nothing or",
+    "    a@big.txt",
+    "    + notes.txt (2 lines), other.lua (1 line),",
+    "    big.txt (first 3 lines), diagnostics (3)",
+    "    ok",
+    "",
+  }, turns(), "the mentions listed under the question")
+  keys("<Esc>q")
+  log = setup({ "ANSWER\nok" }, 0, { mentions = false })
+  ask()
+  eq("", lua("return vim.bo.omnifunc"), "no completion")
+  keys("see @notes.txt<CR>")
+  wait("return answered(1)", "the answer")
+  msg = sent(log)[2]
+  assert(not msg:find("Mentioned", 1, true), msg)
+end)
+
+-- The words in the completion menu, false when it is not showing.
+local function menu()
+  return lua([[
+    if vim.fn.pumvisible() == 0 then return false end
+    local info = vim.fn.complete_info({ "matches", "items" })
+    local typed = vim.api.nvim_get_current_line():sub(1, vim.fn.col(".") - 1):match("@(%S*)$")
+    -- Neovim 0.10 has no "matches": the items that start with what was typed.
+    return vim.iter(info.items):filter(function(i) return i.match or (i.match == nil and vim.startswith(i.word, typed)) end)
+      :map(function(i) return i.word end):totable()
+  ]])
+end
+
+test("@ mentions: completion lists keywords, open buffers and files as you type; Enter takes a selected item", function()
+  local log = setup({ "ANSWER\nok" })
+  workdir({ ["alpha.lua"] = { "return 1" }, ["sub/beta.txt"] = { "beta" } })
+  lua([[vim.fn.bufload(vim.fn.bufadd("gamma.md"))]])
+  lua("vim.o.completeopt = 'menuone,noselect'") -- Neovim 0.10: as you type only with noselect (or noinsert)
+  ask()
+  keys("look at @")
+  wait("return vim.fn.pumvisible() == 1", "the menu")
+  eq({ "diagnostics", "gamma.md", "alpha.lua", "sub/" }, menu(), "keywords, open buffers, files")
+  keys("g")
+  eq({ "gamma.md" }, menu(), "narrowed as you type")
+  keys("<BS>su<C-n>")
+  eq({ "sub/" }, menu())
+  keys("<CR>")
+  wait("return vim.deep_equal(vim.fn.pumvisible() == 1 and vim.fn.complete_info({ 'items' }).items[1].word, 'sub/beta.txt')",
+    "the directory's files")
+  eq({ "look at @sub/" }, floats()["float-claude"].lines, "Enter took the item, nothing sent")
+  keys("<C-n><CR>")
+  eq({ "look at @sub/beta.txt" }, floats()["float-claude"].lines)
+  eq(false, menu(), "no menu for a mention just completed")
+  keys("<CR>")
+  wait("return answered(1)", "the answer")
+  local msg = sent(log)[2]
+  assert(msg:find('@sub/beta.txt: a file (1 line):\n<mention name="sub/beta.txt">\nbeta\n</mention>', 1, true), msg)
+end)
+
+test("model and effort: the CLI starts with the setup ones; shown in the header; switched per chat", function()
+  local log = setup({ "ANSWER\nok", "ANSWER\nok" }, 0, { model = "sonnet", effort = "high" })
+  lua("vim.api.nvim_buf_set_name(0, 'demo.lua')")
+  ask()
+  local function header()
+    return floats()["float-claude-transcript"].lines[2]
+  end
+  eq("  demo.lua · L2–6 · 5 lines · sonnet · high", header())
+  wait("return logged(1)", "the CLI to start")
+  local argv = vim.json.decode(vim.fn.readfile(log)[1]).argv
+  local args = table.concat(vim.tbl_map(function(i)
+    return argv[tostring(i)]
+  end, vim.fn.range(1, vim.tbl_count(argv) - 1)), " ")
+  assert(args:find("--model sonnet --effort high", 1, true), args)
+  keys("<Esc>:FloatClaudeModel opus<CR>")
+  wait([[return transcript()[2]:find("opus") ~= nil]], "the header to show the model")
+  keys(":FloatClaudeEffort low<CR>")
+  wait([[return transcript()[2]:find("low") ~= nil]], "the header to show the effort")
+  eq("  demo.lua · L2–6 · 5 lines · opus · low", header())
+  keys(":FloatClaudeEffort turbo<CR>")
+  eq("float-claude: unknown effort turbo", last_message())
+  keys(":FloatClaudeModel bad<CR>")
+  wait([[return vim.fn.execute("1messages"):find("bad") ~= nil]], "the refusal")
+  eq("float-claude: model bad: Model 'bad' not found", last_message())
+  eq("  demo.lua · L2–6 · 5 lines · opus · low", header(), "unchanged")
+  eq({ "sonnet" }, lua([[return vim.fn.getcompletion("FloatClaudeModel s", "cmdline")]]), "models complete")
+  eq({ "xhigh" }, lua([[return vim.fn.getcompletion("FloatClaudeEffort x", "cmdline")]]), "efforts complete")
+  -- From the palette: "model", then "haiku" from the models.
+  lua([[vim.ui.select = function(items, o, done)
+    _G.listed = vim.tbl_map(o.format_item or tostring, items)
+    vim.ui.select = function(_, _, d) d("haiku") end
+    done(vim.iter(items):find(function(i) return i.label and vim.startswith(i.label, "model") end))
+  end]])
+  keys(":FloatClaude<CR>")
+  assert(vim.tbl_contains(lua("return listed"), "model       opus") and vim.tbl_contains(lua("return listed"), "effort      low"),
+    vim.inspect(lua("return listed")))
+  wait([[return transcript()[2]:find("haiku") ~= nil]], "the palette's switch")
+  keys("ihi<CR>")
+  wait("return answered(1)", "the answer")
+  eq({ "<start>", "<set_model opus>", '<apply_flag_settings {"effortLevel":"low"}>', "<set_model bad>", "<set_model haiku>" },
+    vim.list_slice(sent(log), 1, 5), "one process: switched in place")
+  keys("<Esc>q")
+  ask()
+  eq("  demo.lua · L2–6 · 5 lines · sonnet · high", header(), "a new chat starts with the setup ones")
+end)
+
+test("model: without one set, the header shows the model the CLI reports", function()
+  setup({ "ANSWER\nok" })
+  lua("vim.env.FAKE_CLAUDE_MODEL = 'claude-fake-1' vim.api.nvim_buf_set_name(0, 'demo.lua')")
+  ask()
+  eq("  demo.lua · L2–6 · 5 lines", floats()["float-claude-transcript"].lines[2], "not known yet")
+  keys("hi<CR>")
+  wait("return answered(1)", "the answer")
+  eq("  demo.lua · L2–6 · 5 lines · fake-1", floats()["float-claude-transcript"].lines[2])
 end)
 
 if failures > 0 then

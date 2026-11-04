@@ -4,8 +4,17 @@ local M = {}
 local config = {
   -- Visual (and Normal: current line) mode mapping that opens the popup. `false` disables it.
   keymap = "<leader>ai",
-  -- The Claude Code CLI; extra arguments may follow, e.g. { "claude", "--model", "sonnet" }.
+  -- The Claude Code CLI; extra arguments may follow.
   cmd = { "claude" },
+  -- The model each chat starts with: an alias ("opus", "sonnet", "haiku", "fable")
+  -- or a full model name; false: the CLI's default. :FloatClaudeModel switches a chat's.
+  model = false,
+  -- The effort each chat starts with: "low", "medium", "high", "xhigh" or "max";
+  -- false: the CLI's default. :FloatClaudeEffort switches a chat's.
+  effort = false,
+  -- @ mentions in the prompt (@diagnostics, @<buffer or file>), each sending at
+  -- most max_lines lines; false: off.
+  mentions = { max_lines = 500 },
   -- Your own instructions for Claude, added to the built-in ones in every chat:
   -- a string, or a function(ctx) returning one (ctx: buf, file, filetype).
   prompt = false,
@@ -191,6 +200,16 @@ function M.palette(range)
   if current and not current.hidden() then
     table.insert(items, { label = string.format("%-11s %s", "hide", config.hide_key or ""), run = current.hide })
   end
+  if current then
+    for _, kind in ipairs({ "model", "effort" }) do
+      table.insert(items, {
+        label = string.format("%-11s %s", kind, current[kind]() or "default"),
+        run = function()
+          M.switch(kind)
+        end,
+      })
+    end
+  end
   table.insert(items, {
     label = string.format("%-11s %s", "theme", config.theme),
     run = function()
@@ -209,6 +228,31 @@ function M.palette(range)
   }, function(item)
     if item then
       item.run()
+    end
+  end)
+end
+
+---Switch the open chat's `kind` ("model" or "effort") to `value`, or to one
+---picked from a list (vim.ui.select) without it. It applies from the next message.
+function M.switch(kind, value)
+  local current = require("float-claude.chat").current()
+  local claude, util = require("float-claude.claude"), require("float-claude.util")
+  if not current then
+    return util.error("no chat is open")
+  end
+  local values = kind == "model" and claude.models or claude.efforts
+  local function set(v)
+    if kind == "effort" and not vim.tbl_contains(values, v) then
+      return util.error("unknown effort " .. v)
+    end
+    current["set_" .. kind](v)
+  end
+  if value then
+    return set(value)
+  end
+  vim.ui.select(values, { prompt = "float-claude " .. kind }, function(v)
+    if v then
+      set(v)
     end
   end)
 end
@@ -272,6 +316,19 @@ function M.setup(opts)
     group = group,
     callback = restyle,
   })
+  for kind, values in pairs({ Model = require("float-claude.claude").models, Effort = require("float-claude.claude").efforts }) do
+    vim.api.nvim_create_user_command("FloatClaude" .. kind, function(cmd)
+      M.switch(kind:lower(), cmd.args ~= "" and cmd.args or nil)
+    end, {
+      nargs = "?",
+      desc = "float-claude: switch the chat's " .. kind:lower(),
+      complete = function(lead)
+        return vim.tbl_filter(function(v)
+          return vim.startswith(v, lead)
+        end, values)
+      end,
+    })
+  end
   vim.api.nvim_create_user_command("FloatClaudeTheme", function(cmd)
     if not vim.tbl_contains(require("float-claude.theme").names(), cmd.args) then
       return require("float-claude.util").error(string.format('unknown theme "%s"', cmd.args))
