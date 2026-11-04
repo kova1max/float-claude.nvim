@@ -3,8 +3,15 @@
 -- handling (mappings, mode changes, autocmds). tests/fake_claude.lua stands in
 -- for the Claude Code CLI, so no network or account is needed.
 
+io.stdout:setvbuf("line") -- results show as they come, also when piped
 local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
 local failures, chan = 0, nil
+-- Children keep their state (swap, shada, logs) out of the user's directories.
+local xdg = vim.fn.tempname()
+local env = {}
+for _, dir in ipairs({ "CONFIG", "DATA", "STATE", "CACHE" }) do
+  env["XDG_" .. dir .. "_HOME"] = xdg .. "/" .. dir:lower()
+end
 
 local function lua(code, ...)
   return vim.rpcrequest(chan, "nvim_exec_lua", code, { ... })
@@ -31,8 +38,9 @@ local function eq(expected, actual, what)
 end
 
 local function test(name, fn)
-  chan = vim.fn.jobstart({ vim.v.progpath, "--clean", "--embed", "--headless", "--cmd", "set rtp^=" .. root }, {
+  chan = vim.fn.jobstart({ vim.v.progpath, "--clean", "-n", "--embed", "--headless", "--cmd", "set rtp^=" .. root }, {
     rpc = true,
+    env = env,
   })
   vim.rpcrequest(chan, "nvim_ui_attach", 80, 24, {})
   local ok, err = pcall(fn)
@@ -71,7 +79,8 @@ local function setup(replies, delay, opts)
     vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
     vim.bo.filetype = "lua"
     vim.wo.number = true
-    -- Test helpers: the transcript lines, and whether `n` answers are complete.
+    -- Test helpers: the transcript lines, and whether `n` answers are complete
+    -- (each ends with a blank row; the first row is padding).
     function _G.transcript()
       for _, b in ipairs(vim.api.nvim_list_bufs()) do
         if vim.bo[b].filetype == "float-claude-transcript" then
@@ -82,8 +91,8 @@ local function setup(replies, delay, opts)
     end
     function _G.answered(n)
       local done = 0
-      for _, l in ipairs(transcript()) do
-        done = done + (l == "" and 1 or 0)
+      for i, l in ipairs(transcript()) do
+        done = done + ((i > 1 and l == "") and 1 or 0)
       end
       return done >= n and vim.bo.filetype == "float-claude"
     end
@@ -141,15 +150,24 @@ local function sent(log)
   return out
 end
 
+-- The conversation's turns: the transcript without its padding row and header.
+local function turns()
+  return vim.list_slice(floats()["float-claude-transcript"].lines, 3)
+end
+
 local function last_message()
   return lua([[return vim.trim(vim.fn.execute("1messages"))]])
 end
 
-test("popup opens under the selection with text at the last line's indent", function()
+test("the popup is pinned top-right: padding, header, then the prompt", function()
   setup()
+  lua("vim.api.nvim_buf_set_name(0, 'demo.lua')")
   ask()
-  local text_col = lua("return vim.fn.screenpos(1000, 6, 3).col - 1")
-  eq({ row = 6, col = text_col - 3, width = 60, height = 1, lines = { "" }, top = 1 }, floats()["float-claude"])
+  local f = floats()
+  eq({ row = 0, col = 30, width = 50, height = 2, lines = { "", "  demo.lua · L2–6 · 5 lines" }, top = 1 },
+    f["float-claude-transcript"], "padding row and header")
+  eq({ row = 2, col = 30, width = 50, height = 2, lines = { "" }, top = 1 }, f["float-claude"], "prompt and padding row")
+  eq("  ❯ ", lua("return vim.fn.screenstring(3, 31) .. vim.fn.screenstring(3, 32) .. vim.fn.screenstring(3, 33) .. vim.fn.screenstring(3, 34)"), "prompt")
   eq("i", lua("return vim.fn.mode()"), "mode")
   local sel = lua([[
     local m = vim.api.nvim_buf_get_extmarks(1, -1, 0, -1, { details = true })[1]
@@ -158,10 +176,11 @@ test("popup opens under the selection with text at the last line's indent", func
   eq({ 1, 6, "FloatClaudeSelection" }, sel, "selection highlight rows")
 end)
 
-test("Normal mode trigger uses the current line", function()
+test("Normal mode trigger uses the current line, not highlighted", function()
   local log = setup({ "ANSWER\nok" })
   keys("4G ai")
-  eq(4, floats()["float-claude"].row, "row below line 4")
+  eq("  [No Name] · L4", floats()["float-claude-transcript"].lines[2], "header")
+  eq(0, marks(), "no selection highlight")
   keys("q?<CR>")
   wait("return logged(2)")
   assert(sent(log)[2]:find("Selected lines 4-4:\n<selection>\n      print(i, j)\n</selection>", 1, true))
@@ -171,15 +190,16 @@ test("the popup has a fixed width; a long prompt wraps onto more rows", function
   setup()
   ask()
   local f = floats()["float-claude"]
+  -- Heights count a padding row under the prompt.
   keys(string.rep("x", 30))
-  eq({ 60, 1 }, { floats()["float-claude"].width, floats()["float-claude"].height }, "short prompt")
+  eq({ 50, 2 }, { floats()["float-claude"].width, floats()["float-claude"].height }, "short prompt")
   keys(string.rep("x", 60))
-  eq({ 60, 2, 1 }, { floats()["float-claude"].width, floats()["float-claude"].height, floats()["float-claude"].top }, "wrapped")
+  eq({ 50, 3, 1 }, { floats()["float-claude"].width, floats()["float-claude"].height, floats()["float-claude"].top }, "wrapped")
   eq(0, lua("return vim.fn.winsaveview().leftcol"), "no sideways scroll")
   -- The wrapped row lines up with the text above it, after the prefix.
-  eq({ f.row + 2, f.col + 4 }, lua("local p = vim.fn.screenpos(0, 1, 58) return { p.row, p.col }"), "wrapped text position")
-  keys(string.rep(" word", 10))
-  eq({ 60, 3 }, { floats()["float-claude"].width, floats()["float-claude"].height }, "words wrap too")
+  eq({ f.row + 2, f.col + 5 }, lua("local p = vim.fn.screenpos(0, 1, 47) return { p.row, p.col }"), "wrapped text position")
+  keys(string.rep(" word", 5))
+  eq({ 50, 4 }, { floats()["float-claude"].width, floats()["float-claude"].height }, "words wrap too")
 end)
 
 test("the width is a setup option, used by the conversation too", function()
@@ -190,7 +210,7 @@ test("the width is a setup option, used by the conversation too", function()
   wait("return answered(1)", "the answer")
   local t = floats()["float-claude-transcript"]
   eq(20, t.width, "conversation width")
-  eq({ " ❯ hello there", "   one two three", "   four five six", "   seven", "" }, t.lines)
+  eq({ "", "  [No Name] · L2–6…", "  ❯ hello there", "    one two three", "    four five six", "    seven", "" }, t.lines)
 end)
 
 test("Shift-Enter and Ctrl-J add lines; every line stays visible", function()
@@ -206,25 +226,42 @@ end)
 test("Ctrl-J splitting a line counts the new line's prefix in the height", function()
   setup()
   ask()
-  keys("a" .. string.rep("x", 58) .. "<Home><Right><C-j>")
-  eq({ "a", string.rep("x", 58) }, floats()["float-claude"].lines, "input lines")
-  eq({ 3, 1 }, { floats()["float-claude"].height, floats()["float-claude"].top }, "height and top line")
+  -- 47 cells fit in a row without the 4-cell prefix, not with it.
+  keys("a" .. string.rep("x", 47) .. "<Home><Right><C-j>")
+  eq({ "a", string.rep("x", 47) }, floats()["float-claude"].lines, "input lines")
+  eq({ 4, 1 }, { floats()["float-claude"].height, floats()["float-claude"].top }, "height and top line")
 end)
 
-test("opens above the selection when there is no room below", function()
-  setup()
-  keys("30GV2j")
+test("cursor placement: 1 row below and 3 columns right of the cursor", function()
+  setup(nil, 0, { placement = "cursor" })
+  keys("2GV4jll ai")
+  local cursor = lua([[
+    local c = vim.api.nvim_win_get_cursor(1000)
+    local p = vim.fn.screenpos(1000, c[1], c[2] + 1)
+    return { p.row - 1, p.col - 1 }
+  ]])
+  local f = floats()
+  eq({ cursor[1] + 1, cursor[2] + 3 }, { f["float-claude-transcript"].row, f["float-claude-transcript"].col }, "position")
+  eq({ cursor[1] + 3, cursor[2] + 3 }, { f["float-claude"].row, f["float-claude"].col }, "prompt below the header")
+end)
+
+test("cursor placement: above the cursor when there is no room below, left of the right edge", function()
+  setup(nil, 0, { placement = "cursor" })
+  lua([[vim.api.nvim_buf_set_lines(0, 31, 32, false, { string.rep("x", 70) })]])
+  keys("30GV2j$")
   lua("vim.cmd('normal! zb')")
   keys(" ai")
-  local first_row = lua("return vim.fn.screenpos(1000, 30, 1).row - 1")
-  eq(first_row - 1, floats()["float-claude"].row, "row above the first selected line")
+  local row = lua("return vim.fn.screenpos(1000, 32, 1).row - 1")
+  local f = floats()
+  eq(row - 4, f["float-claude-transcript"].row, "the popup ends right above the cursor line")
+  eq(30, f["float-claude-transcript"].col, "shifted left to fit")
 end)
 
-test("opens below the selection in a window with a winbar", function()
-  setup()
+test("cursor placement in a window with a winbar", function()
+  setup(nil, 0, { placement = "cursor" })
   lua("vim.wo.winbar = 'bar'")
   ask()
-  eq(lua("return vim.fn.screenpos(1000, 6, 1).row"), floats()["float-claude"].row, "row")
+  eq(lua("return vim.fn.screenpos(1000, 6, 1).row"), floats()["float-claude-transcript"].row, "row")
 end)
 
 test("Esc closes the popup and restores everything", function()
@@ -243,9 +280,8 @@ test("edit: the reply replaces the selection, fences stripped; the popup stays; 
   keys("use ipairs<CR>")
   wait("return answered(1)", "the edit")
   eq({ "function f(nums)", "  for _, a in ipairs(nums) do", "    print(a)", "  end", "end", "-- 8", "-- 9" }, buffer())
-  local t = floats()["float-claude-transcript"]
-  eq({ " ❯ use ipairs", "   refactored 5 → 3 lines · u to undo", "" }, t.lines)
-  eq(lua("return vim.fn.screenpos(1000, 4, 1).row"), t.row, "popup moved under the new lines")
+  eq({ "", "  [No Name] · L2–4 · 3 lines", "  ❯ use ipairs", "    refactored 5 → 3 lines · u to undo", "" },
+    floats()["float-claude-transcript"].lines, "the header shows the new lines")
   eq({ "float-claude", "i" }, lua("return { vim.bo.filetype, vim.fn.mode() }"), "back in the input, Insert mode")
   eq(true, lua("return vim.bo[1].modifiable"), "modifiable restored")
   wait("return #vim.api.nvim_buf_get_extmarks(1, -1, 0, -1, {}) == 1", "the green flash to clear")
@@ -272,9 +308,7 @@ test("edit: streams line by line with the new lines highlighted", function()
   wait("return vim.api.nvim_buf_get_lines(1, 1, 2, false)[1] == '  a()'", "the first line")
   eq({ "function f(nums)", "  a()", "end", "-- 8" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 4, false)"))
   eq(false, lua("return vim.bo[1].modifiable"), "buffer locked while streaming")
-  local t = floats()["float-claude-transcript"]
-  assert(t.lines[2]:find("refactoring…", 1, true), t.lines[2])
-  eq(lua("return vim.fn.screenpos(1000, 2, 1).row"), t.row, "popup under the lines written so far")
+  eq("    refactoring…", turns()[2], "status")
   local added = lua([[
     local n = 0
     for _, m in ipairs(vim.api.nvim_buf_get_extmarks(1, -1, 0, -1, { details = true })) do
@@ -321,15 +355,14 @@ test("edit: a reply that is only the tag ends with an error and restores everyth
   eq({ true, 0, "n" }, { lua("return vim.bo.modifiable"), marks(), lua("return vim.fn.mode()") })
 end)
 
-test("answer: a popup squeezed against the right edge still wraps", function()
+test("answer: a screen narrower than the popup caps its width and still wraps", function()
   setup({ "ANSWER\nok then" })
-  lua([[vim.api.nvim_buf_set_lines(0, 3, 4, false, { string.rep(" ", 75) .. "x" })]])
-  keys("4G ai")
-  eq(4, floats()["float-claude"].width, "squeezed width")
-  keys("hello<CR>")
+  vim.rpcrequest(chan, "nvim_ui_try_resize", 12, 24) -- the narrowest Neovim allows
+  ask()
+  eq({ 0, 12 }, { floats()["float-claude"].col, floats()["float-claude"].width }, "capped width")
+  keys("hello you<CR>")
   wait("return answered(1)", "the answer")
-  eq({ " ❯ h", "   e", "   l", "   l", "   o", "   o", "   k", "   t", "   h", "   e", "   n", "" },
-    floats()["float-claude-transcript"].lines)
+  eq({ "", "  [No Name…", "  ❯ hello", "    you", "    ok then", "" }, floats()["float-claude-transcript"].lines)
 end)
 
 test("answer: streams into the popup, then a fresh input; history is read-only", function()
@@ -339,13 +372,28 @@ test("answer: streams into the popup, then a fresh input; history is read-only",
   wait("return answered(1)", "the answer")
   local f = floats()
   eq({
-    " ❯ what's the time complexity?",
-    "   O(n^2): the nested loops compare every pair. Space is",
-    "   O(1).",
+    "",
+    "  [No Name] · L2–6 · 5 lines",
+    "  ❯ what's the time complexity?",
+    "    O(n^2): the nested loops compare every pair.",
+    "    Space is O(1).",
     "",
   }, f["float-claude-transcript"].lines)
-  eq(60, f["float-claude-transcript"].width, "chat width")
-  eq(f["float-claude-transcript"].row + 4, f["float-claude"].row, "input right below the transcript")
+  eq(50, f["float-claude-transcript"].width, "chat width")
+  eq(f["float-claude-transcript"].row + 6, f["float-claude"].row, "input right below the transcript")
+  -- The question is dimmed, its ❯ is not.
+  local hl = lua([[
+    local out = {}
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.bo[b].filetype == "float-claude-transcript" then
+        for _, m in ipairs(vim.api.nvim_buf_get_extmarks(b, -1, 0, -1, { details = true })) do
+          table.insert(out, { m[2], m[3], m[4].hl_group })
+        end
+      end
+    end
+    return out
+  ]])
+  eq({ { 1, 0, "FloatClaudeHeader" }, { 2, 0, "FloatClaudeHistory" }, { 2, 2, "FloatClaudePrompt" } }, hl, "highlights")
   eq({ "float-claude", "i" }, lua("return { vim.bo.filetype, vim.fn.mode() }"), "back in the input, Insert mode")
   local readonly = lua([[
     for _, b in ipairs(vim.api.nvim_list_bufs()) do
@@ -367,13 +415,13 @@ test("follow-ups reuse the process and carry the conversation", function()
   local s = sent(log)
   eq({ "<start>", "can it be O(n)?" }, { s[1], s[3] }, "one process, the follow-up sent as is")
   eq({
-    " ❯ complexity?",
-    "   O(n^2).",
+    "  ❯ complexity?",
+    "    O(n^2).",
     "",
-    " ❯ can it be O(n)?",
-    "   Yes, with a hash map.",
+    "  ❯ can it be O(n)?",
+    "    Yes, with a hash map.",
     "",
-  }, floats()["float-claude-transcript"].lines)
+  }, turns())
 end)
 
 test("a follow-up can edit the original selection", function()
@@ -384,8 +432,8 @@ test("a follow-up can edit the original selection", function()
   keys("simplify it<CR>")
   wait("return answered(2)", "the edit")
   eq({ "function f(nums)", "  print(#nums)", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 3, false)"))
-  eq({ " ❯ explain", "   It loops twice.", "", " ❯ simplify it", "   refactored 5 → 1 lines · u to undo", "" },
-    floats()["float-claude-transcript"].lines)
+  eq({ "  ❯ explain", "    It loops twice.", "", "  ❯ simplify it", "    refactored 5 → 1 lines · u to undo", "" },
+    turns())
 end)
 
 test("after an edit, a follow-up edit works on the edited lines; each is one undo", function()
@@ -428,14 +476,14 @@ test("answer: the tag may share its line with the answer, split across deltas", 
   keys("sure?<CR>")
   wait("return answered(2)", "the second answer")
   eq({
-    " ❯ explain",
-    "   It loops twice.",
-    "   Then stops.",
+    "  ❯ explain",
+    "    It loops twice.",
+    "    Then stops.",
     "",
-    " ❯ sure?",
-    "   Yes.",
+    "  ❯ sure?",
+    "    Yes.",
     "",
-  }, floats()["float-claude-transcript"].lines)
+  }, turns())
 end)
 
 test("edit: the tag may share its line with the code", function()
@@ -452,14 +500,14 @@ test("chat scrolls like a chat: question to the top, follows, scroll-back is kep
     long[i] = "line " .. i
   end
   setup({ "ANSWER\n" .. table.concat(long, "\n", 1, 20), "ANSWER\n" .. table.concat(long, "\n") .. "\n" }, 60)
-  keys("1GV ai") -- 21 rows of room below line 1
+  keys("1GV ai") -- 22 rows of room
   keys("first<CR>")
   wait("return answered(1)", "the first answer")
   keys("second<CR>")
   wait("return vim.api.nvim_buf_line_count(0) > 26", "the second answer to start")
   local t = floats()["float-claude-transcript"]
-  eq(" ❯ second", t.lines[23], "question line")
-  eq(23, t.top, "the new question sits at the top")
+  eq("  ❯ second", t.lines[25], "question line")
+  eq(25, t.top, "the new question sits at the top")
   wait("return vim.api.nvim_buf_line_count(0) > 45", "more of the answer")
   t = floats()["float-claude-transcript"]
   eq(#t.lines - t.height + 1, t.top, "newest line in view")
@@ -490,7 +538,7 @@ test("scrolled back, the view stays put while the next prompt is typed", functio
   keys("second<CR>")
   wait("return answered(2)", "the second answer")
   local top = floats()["float-claude-transcript"].top
-  eq(" ❯ second", floats()["float-claude-transcript"].lines[top], "the question sits at the top")
+  eq("  ❯ second", floats()["float-claude-transcript"].lines[top], "the question sits at the top")
   keys("<C-u>")
   local scrolled = floats()["float-claude-transcript"].top
   assert(scrolled < top, "scrolled back")

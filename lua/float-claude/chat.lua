@@ -1,5 +1,5 @@
--- The popup under the selection: a prompt input, and once a conversation starts a
--- read-only, scrollable transcript window stacked right above the input.
+-- The popup, pinned top-right or next to the cursor: a read-only, scrollable
+-- conversation window (header, past turns) stacked right above the prompt input.
 local claude = require("float-claude.claude")
 local edit = require("float-claude.edit")
 local util = require("float-claude.util")
@@ -7,7 +7,7 @@ local util = require("float-claude.util")
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("float-claude")
-local PREFIX = 3 -- " ❯ " / "   " before every text line
+local PREFIX = 4 -- "  ❯ " / "    " before every text line: 2 columns of padding, then the prompt
 local SPINNER = { "◐", "◓", "◑", "◒" }
 local CONTEXT_LINES = 40 -- unselected lines sent around the selection
 
@@ -17,6 +17,7 @@ local function set_highlights()
   vim.api.nvim_set_hl(0, "FloatClaudeNormal", { default = true, fg = "#e6e6e6", bg = bg })
   vim.api.nvim_set_hl(0, "FloatClaudePrompt", { default = true, fg = "#3fb5c9", bg = bg })
   vim.api.nvim_set_hl(0, "FloatClaudeHistory", { default = true, fg = "#8a8a8a" })
+  vim.api.nvim_set_hl(0, "FloatClaudeHeader", { default = true, fg = "#4e4e55" })
   vim.api.nvim_set_hl(0, "FloatClaudeSelection", { default = true, link = "Visual" })
   vim.api.nvim_set_hl(0, "FloatClaudeAdded", { default = true, bg = "#12301f" })
 end
@@ -132,8 +133,23 @@ local function transcript_keymaps(s, close)
   vim.keymap.set("n", "<Down>", "<C-e>", { buffer = s.tbuf })
 end
 
+-- "test.js · L7–13 · 7 lines", or "test.js · L7" for a single line.
+local function header(s, width)
+  local name = vim.api.nvim_buf_get_name(s.buf)
+  name = name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":t")
+  local text = s.first == s.last and string.format("%s · L%d", name, s.first)
+    or string.format("%s · L%d–%d · %d lines", name, s.first, s.last, s.last - s.first + 1)
+  while width_of(text) > width and vim.fn.strchars(text) > 1 do -- too long: cut the end
+    text = vim.fn.strcharpart(text, 0, vim.fn.strchars(text) - 2) .. "…"
+  end
+  return text
+end
+
 ---Open the popup for lines `first`..`last` of the current window's buffer.
----@param opts { first: integer, last: integer, cmd: string[], width: integer }
+---@param opts { first: integer, last: integer, selected: boolean, cmd: string[], width: integer, placement: string }
+---  `selected` is true when the lines come from a Visual selection; they stay
+---  highlighted while the popup is open. `placement` is "top-right" (pinned to
+---  the editor's top-right corner) or "cursor" (1 row below, 3 columns right of it).
 function M.open(opts)
   set_highlights()
   local s = {
@@ -151,34 +167,14 @@ function M.open(opts)
   local proc, editing, spin_timer
   local close
 
-  -- Anchor: screen row of the first/last selected line, and the screen column of
-  -- the last line's first non-blank character (where typed text starts). An edit
-  -- in progress counts the lines written so far.
-  local function anchor()
-    local function screen(lnum, col)
-      local pos = vim.fn.screenpos(s.win, lnum, col)
-      return pos.row - 1, pos.col - 1
-    end
-    local last = editing and s.first + editing.lines() - 1 or s.last
-    local last_line = vim.api.nvim_buf_get_lines(s.buf, last - 1, last, false)[1]
-    local indent = #last_line:match("^%s*")
-    local row_last, col = screen(last, math.min(indent, math.max(#last_line - 1, 0)) + 1)
-    local row_first = screen(s.first, 1)
-    if row_last < 0 then -- last line scrolled out of view: anchor at the cursor line instead
-      row_last, col = screen(s.cursor[1], s.cursor[2] + 1)
-    end
-    if row_first < 0 then
-      row_first = row_last
-    end
-    if indent >= #last_line and #last_line > 0 then
-      col = col + 1 -- whitespace-only line: text would start after it
-    end
-    return row_last, row_first, col
-  end
-  -- The column stays where the popup opened; the rows follow the selection.
-  local _, _, text_col = anchor()
+  -- Screen cell of the cursor (0-based), for the "cursor" placement.
+  local cursor_pos = vim.fn.screenpos(s.win, s.cursor[1], s.cursor[2] + 1)
+  local cursor_row, cursor_col = cursor_pos.row - 1, cursor_pos.col - 1
 
   local function set_selection()
+    if not opts.selected then
+      return
+    end
     local count = vim.api.nvim_buf_line_count(s.buf)
     local last_line = vim.api.nvim_buf_get_lines(s.buf, s.last - 1, s.last, false)[1]
     s.sel_mark = vim.api.nvim_buf_set_extmark(s.buf, ns, s.first - 1, 0, {
@@ -217,6 +213,11 @@ function M.open(opts)
     return buf
   end
 
+  -- The popup is two windows stacked: the conversation (padding row, header,
+  -- past turns; read-only) and the prompt input below it.
+  s.tbuf = scratch("float-claude-transcript")
+  vim.bo[s.tbuf].modifiable = false
+  s.twin = float_win(s.tbuf, false)
   s.ibuf = scratch("float-claude")
   local group = vim.api.nvim_create_augroup("float-claude-" .. s.ibuf, {})
   s.iwin = float_win(s.ibuf, true)
@@ -227,7 +228,15 @@ function M.open(opts)
   vim.wo[s.iwin].breakindentopt = "shift:" .. PREFIX
   vim.wo[s.iwin].showbreak = "NONE"
 
-  -- Transcript lines with their highlights, rebuilt from s.exchanges.
+  local function streaming()
+    local ex = s.exchanges[#s.exchanges]
+    return ex ~= nil and not ex.done
+  end
+
+  -- Transcript lines with their highlights, rebuilt from s.exchanges: a padding
+  -- row, the header, then each turn ("  ❯ question", the reply indented under
+  -- it, a blank row). While a reply streams the prompt is hidden, so a last
+  -- blank row pads the bottom.
   local function transcript(width)
     local lines, hls = {}, {}
     local function add(text, hl)
@@ -236,32 +245,33 @@ function M.open(opts)
         table.insert(hls, { #lines - 1, hl })
       end
     end
+    local text_width = width - PREFIX - 1
+    add("")
+    add("  " .. header(s, width - 3), "FloatClaudeHeader")
     for _, ex in ipairs(s.exchanges) do
       ex.line = #lines + 1
-      for i, l in ipairs(wrap(ex.q, width - PREFIX - 1)) do
-        add((i == 1 and " ❯ " or "   ") .. l, "FloatClaudeHistory")
+      for i, l in ipairs(wrap(ex.q, text_width)) do
+        add((i == 1 and "  ❯ " or "    ") .. l, "FloatClaudeHistory")
       end
       if ex.edit then -- the spinner rides on the lines being written
-        for _, l in ipairs(wrap(ex.note or "refactoring…", width - PREFIX - 1)) do
-          add("   " .. l, "FloatClaudeHistory")
+        for _, l in ipairs(wrap(ex.note or "refactoring…", text_width)) do
+          add("    " .. l, "FloatClaudeHistory")
         end
       elseif ex.a == "" and not ex.done then
-        add("   " .. SPINNER[s.frame], "FloatClaudeHistory")
+        add("    " .. SPINNER[s.frame], "FloatClaudeHistory")
       else
-        for _, l in ipairs(wrap(ex.a, width - PREFIX - 1)) do
-          add("   " .. l)
+        for _, l in ipairs(wrap(ex.a, text_width)) do
+          add("    " .. l)
         end
       end
       if ex.done then
         add("")
       end
     end
+    if streaming() then
+      add("")
+    end
     return lines, hls
-  end
-
-  local function streaming()
-    local ex = s.exchanges[#s.exchanges]
-    return ex ~= nil and not ex.done
   end
 
   -- Scroll the transcript like a chat: the latest question at the top once
@@ -269,12 +279,13 @@ function M.open(opts)
   local function follow_top()
     local n = vim.api.nvim_buf_line_count(s.tbuf)
     local h = vim.api.nvim_win_get_height(s.twin)
-    local q = s.exchanges[#s.exchanges].line
+    local ex = s.exchanges[#s.exchanges]
+    local q = ex and ex.line or 1
     return n <= h and 1 or math.max(math.min(q, n), n - h + 1), n
   end
 
   local function follow_view()
-    if not (s.twin and s.follow) then
+    if not s.follow then
       return
     end
     local top, n = follow_top()
@@ -288,24 +299,18 @@ function M.open(opts)
     if closed then
       return
     end
-    local chatting = #s.exchanges > 0
-    local row_last, row_first = anchor()
-    local col = math.max(text_col - PREFIX, 0)
-    local width = math.max(math.min(opts.width, vim.o.columns - col), 1)
+    local width = math.max(math.min(opts.width, vim.o.columns), 1)
 
-    local kept = s.twin and not s.follow and vim.fn.line("w0", s.twin)
-    local tlines, hls = {}, {}
-    if chatting then
-      tlines, hls = transcript(width)
-      vim.bo[s.tbuf].modifiable = true
-      vim.api.nvim_buf_set_lines(s.tbuf, 0, -1, false, tlines)
-      vim.bo[s.tbuf].modifiable = false
-      vim.api.nvim_buf_clear_namespace(s.tbuf, ns, 0, -1)
-      for _, hl in ipairs(hls) do
-        vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], 0, { end_col = #tlines[hl[1] + 1], hl_group = hl[2] })
-        if tlines[hl[1] + 1]:sub(1, 4) == " ❯" then
-          vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], 1, { end_col = 4, hl_group = "FloatClaudePrompt", priority = 5000 })
-        end
+    local kept = not s.follow and vim.fn.line("w0", s.twin)
+    local tlines, hls = transcript(width)
+    vim.bo[s.tbuf].modifiable = true
+    vim.api.nvim_buf_set_lines(s.tbuf, 0, -1, false, tlines)
+    vim.bo[s.tbuf].modifiable = false
+    vim.api.nvim_buf_clear_namespace(s.tbuf, ns, 0, -1)
+    for _, hl in ipairs(hls) do
+      vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], 0, { end_col = #tlines[hl[1] + 1], hl_group = hl[2] })
+      if tlines[hl[1] + 1]:sub(1, 5) == "  ❯" then
+        vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], 2, { end_col = 5, hl_group = "FloatClaudePrompt", priority = 5000 })
       end
     end
 
@@ -313,35 +318,38 @@ function M.open(opts)
     vim.api.nvim_buf_clear_namespace(s.ibuf, ns, 0, -1)
     for lnum = 0, vim.api.nvim_buf_line_count(s.ibuf) - 1 do
       vim.api.nvim_buf_set_extmark(s.ibuf, ns, lnum, 0, {
-        virt_text = { lnum == 0 and { " ❯ ", "FloatClaudePrompt" } or { "   ", "FloatClaudeNormal" } },
+        virt_text = { lnum == 0 and { "  ❯ ", "FloatClaudePrompt" } or { "    ", "FloatClaudeNormal" } },
         virt_text_pos = "inline",
         right_gravity = false, -- keep the prefix left of text typed at column 0
       })
     end
-    -- The input's height is its rows once wrapped to the width.
+    -- The input's height is its rows once wrapped to the width, plus a padding row.
     vim.api.nvim_win_set_config(s.iwin, { width = width })
     local input_rows = vim.api.nvim_win_text_height(s.iwin, {}).all
-    local show_input = not streaming()
-    local ih = show_input and input_rows or 0
+    local ih = streaming() and 0 or input_rows + 1
     local bottom = vim.o.lines - vim.o.cmdheight - (vim.o.laststatus == 0 and 0 or 1)
-    local room_below, room_above = bottom - (row_last + 1), row_first
     local need = #tlines + ih
-    local below = need <= room_below or room_below >= room_above
-    local room = math.max(below and room_below or room_above, 1)
+    local col, top, room
+    if opts.placement == "cursor" then
+      col = math.max(math.min(cursor_col + 3, vim.o.columns - width), 0)
+      local room_below, room_above = bottom - (cursor_row + 1), cursor_row
+      local below = need <= room_below or room_below >= room_above
+      room = math.max(below and room_below or room_above, 1)
+      top = below and cursor_row + 1 or cursor_row - math.min(need, room)
+    else
+      col, top, room = vim.o.columns - width, 0, math.max(bottom, 1)
+    end
     ih = math.min(ih, room)
     local th = math.min(#tlines, room - ih)
-    local top = below and row_last + 1 or row_first - (th + ih)
 
-    if s.twin then
-      vim.api.nvim_win_set_config(s.twin, {
-        relative = "editor",
-        row = top,
-        col = col,
-        width = width,
-        height = math.max(th, 1),
-        hide = th == 0,
-      })
-    end
+    vim.api.nvim_win_set_config(s.twin, {
+      relative = "editor",
+      row = top,
+      col = col,
+      width = width,
+      height = math.max(th, 1),
+      hide = th == 0,
+    })
     vim.api.nvim_win_set_config(s.iwin, {
       relative = "editor",
       row = top + th,
@@ -353,7 +361,7 @@ function M.open(opts)
 
     -- A new row scrolls the still-short input before it grows; undo that once
     -- everything fits.
-    if input_rows <= ih then
+    if input_rows < ih then
       vim.api.nvim_win_call(s.iwin, function()
         local view = vim.fn.winsaveview()
         if view.topline > 1 or (view.skipcol or 0) > 0 then
@@ -497,8 +505,7 @@ function M.open(opts)
   local reply, tag = "", nil
   local function on_delta(text)
     if editing then
-      editing.feed(text)
-      return layout() -- the popup follows the written lines
+      return editing.feed(text)
     end
     if closed then
       return
@@ -558,23 +565,6 @@ function M.open(opts)
       return
     end
     local message = #s.exchanges == 0 and first_message(s, text) or text
-    if not s.twin then
-      s.tbuf = scratch("float-claude-transcript")
-      vim.bo[s.tbuf].modifiable = false
-      s.twin = float_win(s.tbuf, false)
-      vim.api.nvim_create_autocmd("WinScrolled", {
-        group = group,
-        pattern = tostring(s.twin),
-        callback = function()
-          -- Scrolled back, the view stays put; scrolled down to where following
-          -- would put it, it follows again.
-          if vim.api.nvim_win_is_valid(s.twin) then
-            s.follow = vim.fn.line("w0", s.twin) >= follow_top()
-          end
-        end,
-      })
-      transcript_keymaps(s, close)
-    end
     table.insert(s.exchanges, { q = text, a = "", done = false })
     reply, tag = "", nil
     s.follow = true
@@ -595,7 +585,7 @@ function M.open(opts)
   -- Scroll the transcript from the input. Scrolling down when it cannot go
   -- further (e.g. the newest question is pinned at the top) follows again.
   local function scroll(key, down)
-    if s.twin and vim.api.nvim_win_is_valid(s.twin) then
+    if vim.api.nvim_win_is_valid(s.twin) then
       local top = vim.fn.line("w0", s.twin)
       vim.api.nvim_win_call(s.twin, function()
         vim.cmd("normal! " .. vim.keycode(key))
@@ -606,7 +596,6 @@ function M.open(opts)
       end
     end
   end
-
 
   local function map(modes, lhs, rhs)
     vim.keymap.set(modes, lhs, rhs, { buffer = s.ibuf, nowait = true })
@@ -644,6 +633,19 @@ function M.open(opts)
     end
     scroll("<C-e>", true)
   end)
+
+  vim.api.nvim_create_autocmd("WinScrolled", {
+    group = group,
+    pattern = tostring(s.twin),
+    callback = function()
+      -- Scrolled back, the view stays put; scrolled down to where following
+      -- would put it, it follows again.
+      if vim.api.nvim_win_is_valid(s.twin) then
+        s.follow = vim.fn.line("w0", s.twin) >= follow_top()
+      end
+    end,
+  })
+  transcript_keymaps(s, close)
 
   vim.api.nvim_create_autocmd(
     { "TextChanged", "TextChangedI", "TextChangedP" },

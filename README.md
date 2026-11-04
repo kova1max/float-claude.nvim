@@ -1,10 +1,21 @@
 # float-claude.nvim
-Neovim: select code, press a key, and ask Claude in a small popup right under the selection
+Neovim: select code, press a key, and ask Claude in a small popup pinned to the top-right corner
 
-Select some lines, press `<leader>ai`, type a prompt in the borderless popup that opens under the selection, and press Enter. Claude decides what the prompt needs:
+Select some lines, press `<leader>ai`, type a prompt in the borderless popup, and press Enter. The popup is pinned to the editor's top-right corner (or opens next to the cursor, see `placement`); the selection stays highlighted while it is open. Claude decides what the prompt needs:
 
 - **Edit**: "use a hash map, one pass". The selected lines are rewritten in place, streaming in line by line with the new lines briefly highlighted. The popup stays open with a note that the edit was applied, so you can keep going ("also rename x"); a follow-up edit works on the lines as they are now. Each edit is one `u` in the buffer.
 - **Answer**: "what's the time complexity?". The answer streams into the popup and you can keep asking follow-ups ("can it be O(n)?"). A follow-up can also ask for an edit of the selection.
+
+```
+  test.js · L7–13 · 7 lines
+  ❯ what's the time complexity?
+    O(n²): the nested loops compare every pair.
+    Space is O(1).
+
+  ❯ █
+```
+
+The header names the file and the lines Claude sees (`test.js · L7` for a single line). Past questions are dimmed, replies are indented under them, and a fresh `❯` prompt waits at the bottom.
 
 Pure Lua, no plugin dependencies. Replies come from the [Claude Code](https://claude.com/claude-code) CLI running headless in the background (one `claude -p` process per popup, so follow-ups continue the same conversation); no API key and no HTTP code in the plugin.
 
@@ -29,13 +40,13 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | Key | Where | Action |
 |---|---|---|
 | `<leader>ai` | Visual | Ask about the selected lines (any Visual mode; whole lines are used) |
-| `<leader>ai` | Normal | Ask about the current line |
+| `<leader>ai` | Normal | Ask about the current line (not highlighted) |
 | `<CR>` | Popup | Send the prompt |
 | `<S-CR>` or `<C-j>` | Popup | New line in the prompt (use `<C-j>` if your terminal does not send Shift-Enter) |
 | `<C-u>` / `<C-d>`, mouse wheel, `<Up>` / `<Down>` | Popup | Scroll the conversation (in a multi-line prompt the arrows first move between its lines) |
 | `<Esc>` | Popup, or while an edit streams | Close and cancel the request; a half-written edit is undone |
 
-The popup has a fixed width (see `width` below); a longer prompt or answer wraps onto more rows, never scrolling sideways.
+The popup has a fixed width (see `width` below) and grows downwards with the conversation; a longer prompt or answer wraps onto more rows, never scrolling sideways.
 
 The conversation scrolls like a chat: once it no longer fits, each new question moves to the top of the popup and the answer streams in below it, following the newest line. Scroll back and the view stays put while the answer streams and while you type the next prompt; scroll down again to follow. The history is read-only. While a reply streams, the cursor sits in the conversation, so Normal-mode motions scroll it too; `<Esc>` or `q` closes. With `mouse` off (as with hardtime.nvim), most terminals send the wheel as arrow keys, so the wheel still scrolls.
 
@@ -51,7 +62,8 @@ Because no settings files are loaded, your Claude Code hooks, `CLAUDE.md` files 
 require("float-claude").setup({
   keymap = "<leader>ai", -- Visual + Normal mode; false to skip it and map require("float-claude").ask yourself
   cmd = { "claude" }, -- the CLI, with extra arguments if you like, e.g. { "claude", "--model", "sonnet" }
-  width = 60, -- popup width in columns, capped to the screen; longer lines wrap
+  width = 50, -- popup width in columns, capped to the screen; longer lines wrap
+  placement = "top-right", -- or "cursor": the popup's top-left corner 1 row below and 3 columns right of the cursor
 })
 ```
 
@@ -62,7 +74,8 @@ Colors come from highlight groups defined with `default = true`, so a colorschem
 | `FloatClaudeNormal` | `fg = #e6e6e6, bg = #1c1c1f` | popup, typed text, answers |
 | `FloatClaudePrompt` | `fg = #3fb5c9` | the `❯` |
 | `FloatClaudeHistory` | `fg = #8a8a8a` | sent questions, spinners, `refactoring…`, edit notes |
-| `FloatClaudeSelection` | links to `Visual` | the selection while the popup or an edit is active |
+| `FloatClaudeHeader` | `fg = #4e4e55` | the file and lines header |
+| `FloatClaudeSelection` | links to `Visual` | the selected lines while the popup or an edit is active |
 | `FloatClaudeAdded` | `bg = #12301f` | freshly written lines |
 
 ## Development

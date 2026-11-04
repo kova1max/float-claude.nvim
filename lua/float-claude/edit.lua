@@ -84,11 +84,6 @@ function M.start(opts)
     draw_spinner()
   end
 
-  ---How many lines the selected range holds right now.
-  function self.lines()
-    return written == 0 and old_count or written
-  end
-
   ---Feed reply text (after the EDIT tag line); complete lines are written as they arrive.
   function self.feed(text)
     if ended then
