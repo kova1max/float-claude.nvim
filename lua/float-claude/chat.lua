@@ -309,6 +309,15 @@ function M.open(opts)
       end
     end
 
+    -- Input: the prefix is virtual text so the buffer holds exactly what was typed.
+    vim.api.nvim_buf_clear_namespace(s.ibuf, ns, 0, -1)
+    for lnum = 0, vim.api.nvim_buf_line_count(s.ibuf) - 1 do
+      vim.api.nvim_buf_set_extmark(s.ibuf, ns, lnum, 0, {
+        virt_text = { lnum == 0 and { " ❯ ", "FloatClaudePrompt" } or { "   ", "FloatClaudeNormal" } },
+        virt_text_pos = "inline",
+        right_gravity = false, -- keep the prefix left of text typed at column 0
+      })
+    end
     -- The input's height is its rows once wrapped to the width.
     vim.api.nvim_win_set_config(s.iwin, { width = width })
     local input_rows = vim.api.nvim_win_text_height(s.iwin, {}).all
@@ -342,15 +351,6 @@ function M.open(opts)
       hide = ih == 0,
     })
 
-    -- Input: the prefix is virtual text so the buffer holds exactly what was typed.
-    vim.api.nvim_buf_clear_namespace(s.ibuf, ns, 0, -1)
-    for lnum = 0, vim.api.nvim_buf_line_count(s.ibuf) - 1 do
-      vim.api.nvim_buf_set_extmark(s.ibuf, ns, lnum, 0, {
-        virt_text = { lnum == 0 and { " ❯ ", "FloatClaudePrompt" } or { "   ", "FloatClaudeNormal" } },
-        virt_text_pos = "inline",
-        right_gravity = false, -- keep the prefix left of text typed at column 0
-      })
-    end
     -- A new row scrolls the still-short input before it grows; undo that once
     -- everything fits.
     if input_rows <= ih then
@@ -536,7 +536,11 @@ function M.open(opts)
       local rest
       tag, rest = parse_tag(reply, true)
       if tag == "EDIT" then
-        return start_edit(rest)
+        start_edit(rest)
+        if editing then
+          editing.finish()
+        end
+        return
       end
       ex.a = rest
     end
