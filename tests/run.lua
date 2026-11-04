@@ -458,7 +458,8 @@ test("review_edits: the discard key (configurable) leaves the buffer as it was; 
   keys("and now?<CR>")
   wait("return answered(2)", "the answer")
   local msg = sent(log)[3]
-  assert(vim.startswith(msg, "(I discarded your last EDIT.)\nThe current version of the code"), msg)
+  assert(vim.startswith(msg, 'Since your last reply:\n- Your EDIT for "go" was discarded: the code stayed as it was.\n'
+    .. "The current version of the code"), msg)
   assert(msg:find("<selection>\n" .. table.concat(ORIGINAL, "\n", 2, 6) .. "\n</selection>\nRequest: and now?", 1, true), msg)
 end)
 
@@ -647,9 +648,104 @@ test("a follow-up sends the code as it is now: after an edit, hand edits and a l
   keys("and now?<CR>")
   wait("return answered(2)", "the answer")
   local msg = sent(log)[3]
-  assert(vim.startswith(msg, "The current version of the code (it replaces every earlier version):\n"), msg)
+  assert(msg:find("\nThe current version of the code (it replaces every earlier version):\n", 1, true), msg)
   assert(msg:find("<context>\ntop\nfunction f(nums)\n  a()\n  b() -- by hand\nend\n", 1, true), msg)
   assert(msg:find("Selected lines 3-4:\n<selection>\n  a()\n  b() -- by hand\n</selection>\nRequest: and now?", 1, true), msg)
+end)
+
+-- What a sent message says before the code: the change record and the edits list.
+local function record(msg)
+  return msg:match("^(.-)\n?The current version of the code") or msg
+end
+
+test("change history: two edits, a discard and a hand edit; Claude's changes listed apart from the user's", function()
+  local log = setup({ "EDIT\n  a()\n", "EDIT\n  a()\n  b()\n", "EDIT\n  c()\n", "ANSWER\nTwo." }, 0, { review_edits = true })
+  ask()
+  for _, step in ipairs({ { "first", " yy" }, { "second", " yy" }, { "third", " nn" } }) do
+    keys(step[1] .. "<CR>")
+    wait("return reviewing()", "the diff for " .. step[1])
+    keys(step[2])
+  end
+  keys("<C-o>")
+  keys("3GA -- mine<Esc>")
+  keys(" ai")
+  keys("what did you change?<CR>")
+  wait("return answered(4)", "the answer")
+  local s = sent(log)
+  eq(table.concat({
+    "Since your last reply:",
+    '- Your EDIT for "first" (edit #1) was accepted and applied:',
+    "<diff>",
+    "@@ -1,8 +1,4 @@",
+    " function f(nums)",
+    "-  for i = 1, #nums do",
+    "-    for j = i + 1, #nums do",
+    "-      print(i, j)",
+    "-    end",
+    "-  end",
+    "+  a()",
+    " end",
+    " -- 8",
+    "</diff>",
+    "Your edits applied in this conversation so far (each diff was sent once, when it was applied):",
+    '#1 "first": lines 2-6 became line 2',
+  }, "\n"), record(s[3]))
+  eq(table.concat({
+    "Since your last reply:",
+    '- Your EDIT for "second" (edit #2) was accepted and applied:',
+    "<diff>",
+    "@@ -1,4 +1,5 @@",
+    " function f(nums)",
+    "   a()",
+    "+  b()",
+    " end",
+    " -- 8",
+    "</diff>",
+    "Your edits applied in this conversation so far (each diff was sent once, when it was applied):",
+    '#1 "first": lines 2-6 became line 2',
+    '#2 "second": line 2 became lines 2-3',
+  }, "\n"), record(s[4]))
+  eq(table.concat({
+    "Since your last reply:",
+    '- Your EDIT for "third" was discarded: the code stayed as it was.',
+    "- I changed the code myself:",
+    "<diff>",
+    "@@ -1,5 +1,5 @@",
+    " function f(nums)",
+    "   a()",
+    "-  b()",
+    "+  b() -- mine",
+    " end",
+    " -- 8",
+    "</diff>",
+    "Your edits applied in this conversation so far (each diff was sent once, when it was applied):",
+    '#1 "first": lines 2-6 became line 2',
+    '#2 "second": line 2 became lines 2-3',
+  }, "\n"), record(s[5]))
+  assert(s[5]:find("<selection>\n  a()\n  b() -- mine\n</selection>\nRequest: what did you change?", 1, true), s[5])
+  assert(s[5]:find("<context>\nfunction f(nums)\n  a()\n  b() -- mine\nend\n", 1, true), s[5])
+end)
+
+test("change history: unchanged context is not sent again; changes far from the selection are counted", function()
+  local log = setup({ "ANSWER\nok", "ANSWER\nok", "ANSWER\nok" })
+  lua("for i = 41, 60 do vim.api.nvim_buf_set_lines(1, -1, -1, false, { '-- ' .. i }) end")
+  ask()
+  keys("one<CR>")
+  wait("return answered(1)", "the first answer")
+  keys("two<CR>")
+  wait("return answered(2)", "the second answer")
+  keys("<C-o>")
+  lua("vim.api.nvim_buf_set_lines(1, 59, 60, false, { '-- far' })")
+  keys(" ai")
+  keys("three<CR>")
+  wait("return answered(3)", "the third answer")
+  local s = sent(log)
+  assert(s[2]:find("Lines 1-46 of the file, for context:\n<context>\n", 1, true), s[2])
+  eq("The current version of the code (it replaces every earlier version):\nFile: [No Name] (filetype: lua)\n"
+    .. "Lines 1-46 of the file, for context: unchanged since my last message.\nSelected lines 2-6:",
+    s[3]:match("^(.-)\n<selection>"))
+  eq("Since your last reply:\n- I also changed the file in 1 place(s) away from these lines (not shown).", record(s[4]))
+  assert(s[4]:find("Lines 1-46 of the file, for context: unchanged since my last message.", 1, true), s[4])
 end)
 
 test("leaving the popup while an edit streams: the edit finishes, the popup stays", function()

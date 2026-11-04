@@ -78,7 +78,17 @@ With `review_edits = true`, an edit is not applied straight away. It shows as an
 
 The popup stays open either way, so you can keep asking. Hiding or leaving the popup keeps the diff waiting; closing the popup before deciding discards the edit.
 
-Claude gets the file name and filetype, the selected lines, and up to 40 lines around them. Every follow-up sends them again as they are at that moment, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
+### What Claude sees
+
+Claude gets the file name and filetype, the selected lines, and up to 40 lines around them. Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
+
+Claude also remembers what it changed. Each follow-up starts with a short record of what happened since its last reply, as diffs rather than copies of the code:
+
+- its edit: applied (with the diff), accepted in review (with the diff), or discarded;
+- your own changes near the selection, as a separate diff (changes elsewhere in the file are only counted);
+- the numbered list of its edits applied so far.
+
+So "what did you change?" gets its edits apart from yours, and "undo your second change" reverts just that one on top of the current code.
 
 Because no settings files are loaded, your Claude Code hooks, `CLAUDE.md` files and `settings.json` are not used. Auth must come from your normal `claude` login or from environment variables such as `ANTHROPIC_API_KEY` or `CLAUDE_CODE_USE_BEDROCK` set in the shell Neovim runs in; provider settings or an `apiKeyHelper` in `settings.json` are not read.
 

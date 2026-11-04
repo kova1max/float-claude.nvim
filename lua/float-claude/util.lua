@@ -1,5 +1,7 @@
 local M = {}
 
+M.diff = vim.text and vim.text.diff or vim.diff -- vim.diff is deprecated since Neovim 0.11
+
 ---Echo an error as one line: truncated to fit, so it never asks to press Enter.
 function M.error(msg)
   local text = "float-claude: " .. msg:match("[^\n]*")

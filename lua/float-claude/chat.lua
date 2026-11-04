@@ -14,6 +14,7 @@ local ns = vim.api.nvim_create_namespace("float-claude")
 local PREFIX = 4 -- "  ❯ " / "    " before every text line: 2 columns of padding, then the prompt
 local SPINNER = { "◐", "◓", "◑", "◒" }
 local CONTEXT_LINES = 40 -- unselected lines sent around the selection
+local DIFF_CONTEXT = 2 -- unchanged lines around each change in the diffs sent
 
 local function set_highlights()
   -- `default = true` lets colorschemes and users override these.
@@ -33,31 +34,89 @@ local function width_of(s)
   return vim.fn.strdisplaywidth(s)
 end
 
+-- The lines sent around the selection.
+local function window(s)
+  return math.max(1, s.first - CONTEXT_LINES), math.min(vim.api.nvim_buf_line_count(s.buf), s.last + CONTEXT_LINES)
+end
+
+-- A unified diff from `old` to `new` (lists of lines) with file line numbers,
+-- "" if they are the same. Given `from`/`to`, only the hunks touching those
+-- lines of `new` are kept; the second result counts the others.
+local function unified(old, new, from, to)
+  local text = util.diff(table.concat(old, "\n") .. "\n", table.concat(new, "\n") .. "\n", { ctxlen = DIFF_CONTEXT })
+  local hunks = {}
+  for line in text:gmatch("[^\n]*\n") do
+    if line:match("^@@") then
+      table.insert(hunks, { line })
+    else
+      table.insert(hunks[#hunks], line)
+    end
+  end
+  local kept, skipped = {}, 0
+  for _, hunk in ipairs(hunks) do
+    local start, count = hunk[1]:match("^@@ %-[%d,]+ %+(%d+),?(%d*) @@")
+    local stop = tonumber(start) + math.max(tonumber(count) or 1, 1) - 1
+    if not from or (stop >= from and tonumber(start) <= to) then
+      table.insert(kept, table.concat(hunk))
+    else
+      skipped = skipped + 1
+    end
+  end
+  return table.concat(kept), skipped
+end
+
+-- A request shortened to one line, to name Claude's edits by.
+local function summary(request)
+  local text = vim.trim((request:gsub("%s+", " ")))
+  return vim.fn.strchars(text) > 60 and vim.fn.strcharpart(text, 0, 59) .. "…" or text
+end
+
 -- The request with the selected lines and their context as they are now. A
--- follow-up says so: the code may have changed since the last message.
+-- follow-up starts with what happened to the code since Claude's last reply
+-- (s.log) and the list of Claude's edits applied so far (s.edits); the
+-- context, if unchanged since the last message, is not sent again.
 local function message(s, prompt, followup)
   local buf = s.buf
   local name = vim.api.nvim_buf_get_name(buf)
   name = name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":~:.")
   local ft = vim.bo[buf].filetype
-  local total = vim.api.nvim_buf_line_count(buf)
-  local from, to = math.max(1, s.first - CONTEXT_LINES), math.min(total, s.last + CONTEXT_LINES)
+  local from, to = window(s)
   local function lines(a, b)
     return table.concat(vim.api.nvim_buf_get_lines(buf, a - 1, b, false), "\n")
   end
-  local intro = followup and "The current version of the code (it replaces every earlier version):\n" or ""
-  return intro .. table.concat({
-    string.format("File: %s (filetype: %s)", name, ft == "" and "none" or ft),
-    string.format("Lines %d-%d of the file, for context:", from, to),
-    "<context>",
-    lines(from, to),
-    "</context>",
+  local out = {}
+  if #s.log > 0 then
+    table.insert(out, "Since your last reply:")
+    vim.list_extend(out, s.log)
+  end
+  if #s.edits > 0 then
+    table.insert(out, "Your edits applied in this conversation so far (each diff was sent once, when it was applied):")
+    local function span(n, count)
+      return count == 1 and "line " .. n or string.format("lines %d-%d", n, n + count - 1)
+    end
+    for i, e in ipairs(s.edits) do
+      table.insert(out, string.format('#%d "%s": %s became %s', i, e.request, span(e.first, e.old), span(e.first, e.new)))
+    end
+  end
+  if followup then
+    table.insert(out, "The current version of the code (it replaces every earlier version):")
+  end
+  table.insert(out, string.format("File: %s (filetype: %s)", name, ft == "" and "none" or ft))
+  local context = { from, to, lines(from, to) }
+  if followup and vim.deep_equal(context, s.sent_context) then
+    table.insert(out, string.format("Lines %d-%d of the file, for context: unchanged since my last message.", from, to))
+  else
+    vim.list_extend(out, { string.format("Lines %d-%d of the file, for context:", from, to), "<context>", context[3], "</context>" })
+  end
+  s.sent_context = context
+  vim.list_extend(out, {
     string.format("Selected lines %d-%d:", s.first, s.last),
     "<selection>",
     lines(s.first, s.last),
     "</selection>",
     "Request: " .. prompt,
-  }, "\n")
+  })
+  return table.concat(out, "\n")
 end
 
 -- Splits a reply into its EDIT/ANSWER tag and the rest. The tag is the first
@@ -158,6 +217,12 @@ function M.open(opts)
     hidden = false,
     ts_cache = {}, -- treesitter results for code in answers
     links = {}, -- transcript row: { from, to, target } for names that resolved through LSP
+    -- The change history: `known` is the buffer's lines as Claude knows them
+    -- (as last sent, with its applied edits), `log` what happened to the code
+    -- since its last reply, `edits` its applied edits.
+    known = nil,
+    log = {},
+    edits = {}, -- { request, first, old, new }
   }
   local ft = vim.bo[s.buf].filetype
   s.lang = ft ~= "" and (vim.treesitter.language.get_lang(ft) or ft) or nil
@@ -196,6 +261,22 @@ function M.open(opts)
       s.first = row + 1
       s.last = math.max(end_col == 0 and end_row > row and end_row or end_row + 1, s.first)
     end
+  end
+
+  -- The user's own changes since s.known (near the selection) go into the log
+  -- as a diff; Claude knows the code as it is now then.
+  local function note_hand_changes()
+    local now = vim.api.nvim_buf_get_lines(s.buf, 0, -1, false)
+    if s.known then
+      local d, skipped = unified(s.known, now, window(s))
+      if d ~= "" then
+        table.insert(s.log, "- I changed the code myself:\n<diff>\n" .. d .. "</diff>")
+      end
+      if skipped > 0 then
+        table.insert(s.log, string.format("- I also changed the file in %d place(s) away from these lines (not shown).", skipped))
+      end
+    end
+    s.known = now
   end
 
   local function float_win(buf, enter)
@@ -583,9 +664,14 @@ function M.open(opts)
       return layout()
     end
     if result.discarded then
-      s.discarded = true -- Claude is told with the next message
+      table.insert(s.log, string.format('- Your EDIT for "%s" was discarded: the code stayed as it was.', summary(ex.q)))
       note = "edit discarded"
     else
+      local now = vim.api.nvim_buf_get_lines(s.buf, 0, -1, false)
+      table.insert(s.edits, { request = summary(ex.q), first = s.first, old = result.old, new = result.new })
+      table.insert(s.log, string.format('- Your EDIT for "%s" (edit #%d) was %s:\n<diff>\n%s</diff>', summary(ex.q), #s.edits,
+        opts.review_edits and "accepted and applied" or "applied as is", unified(s.known, now)))
+      s.known = now
       -- Follow-ups work on the new lines.
       s.last = s.first + result.new - 1
       if s.from == s.win and vim.api.nvim_win_is_valid(s.win) and vim.api.nvim_win_get_buf(s.win) == s.buf then
@@ -615,6 +701,7 @@ function M.open(opts)
     local ex = s.exchanges[#s.exchanges]
     ex.edit = true
     sync_selection()
+    note_hand_changes() -- made while Claude was replying; its edit's diff leaves them out
     editing = edit.start({
       buf = s.buf,
       win = s.win,
@@ -695,11 +782,9 @@ function M.open(opts)
       return
     end
     sync_selection()
+    note_hand_changes()
     local msg = message(s, text, #s.exchanges > 0)
-    if s.discarded then
-      msg = "(I discarded your last EDIT.)\n" .. msg
-      s.discarded = false
-    end
+    s.log = {}
     table.insert(s.exchanges, { q = text, a = "", done = false })
     reply, tag = "", nil
     s.follow = true

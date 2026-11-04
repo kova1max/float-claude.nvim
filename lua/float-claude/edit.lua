@@ -11,7 +11,7 @@ local M = {}
 local ns = vim.api.nvim_create_namespace("float-claude-edit")
 local diff_ns = vim.api.nvim_create_namespace("float-claude-diff")
 local SPINNER = { "◐", "◓", "◑", "◒" }
-local diff = vim.text and vim.text.diff or vim.diff -- vim.diff is deprecated since Neovim 0.11
+local diff = util.diff
 
 ---@param opts { buf: integer, win: integer, first: integer, last: integer, review: boolean?, on_end: fun(result: { old: integer, new: integer, pending: boolean? }?) }
 ---  `buf` must be modifiable.
