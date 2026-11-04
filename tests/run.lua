@@ -205,7 +205,9 @@ test("Normal mode trigger uses the current line, not highlighted", function()
   local log = setup({ "ANSWER\nok" })
   keys("4G ai")
   eq("  [No Name] · L4", floats()["float-claude-transcript"].lines[2], "header")
-  eq(0, marks(), "no selection highlight")
+  eq(true, lua([[return vim.iter(vim.api.nvim_buf_get_extmarks(1, -1, 0, -1, { details = true })):all(function(m)
+    return m[4].hl_group == nil
+  end)]]), "no selection highlight")
   keys("q?<CR>")
   wait("return logged(2)")
   assert(sent(log)[2]:find("Selected lines 4-4:\n<selection>\n      print(i, j)\n</selection>", 1, true))
@@ -455,7 +457,9 @@ test("review_edits: the discard key (configurable) leaves the buffer as it was; 
   eq({ "float-claude", "i" }, lua("return { vim.bo.filetype, vim.fn.mode() }"), "back in the prompt")
   keys("and now?<CR>")
   wait("return answered(2)", "the answer")
-  eq("(I discarded your last EDIT; the selected lines are unchanged.)\nand now?", sent(log)[3])
+  local msg = sent(log)[3]
+  assert(vim.startswith(msg, "(I discarded your last EDIT.)\nThe current version of the code"), msg)
+  assert(msg:find("<selection>\n" .. table.concat(ORIGINAL, "\n", 2, 6) .. "\n</selection>\nRequest: and now?", 1, true), msg)
 end)
 
 test("review_edits: new lines stream into the diff; old lines not reached yet stay plain", function()
@@ -591,7 +595,7 @@ test("follow-ups reuse the process and carry the conversation", function()
   keys("can it be O(n)?<CR>")
   wait("return answered(2)", "the second answer")
   local s = sent(log)
-  eq({ "<start>", "can it be O(n)?" }, { s[1], s[3] }, "one process, the follow-up sent as is")
+  eq({ "<start>", true }, { s[1], vim.endswith(s[3], "Request: can it be O(n)?") }, "one process, a follow-up")
   eq({
     "  ❯ complexity?",
     "    O(n^2).",
@@ -622,12 +626,30 @@ test("after an edit, a follow-up edit works on the edited lines; each is one und
   keys("also merge them<CR>")
   wait("return answered(2)", "the second edit")
   eq({ "function f(nums)", "  c()", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 3, false)"))
-  eq("also merge them", sent(log)[3], "the follow-up is sent as is")
+  assert(sent(log)[3]:find("Selected lines 2-3:\n<selection>\n  a()\n  b()\n</selection>\nRequest: also merge them", 1, true),
+    "the follow-up carries the edited lines")
   keys("<Esc>")
   keys("u")
   eq({ "function f(nums)", "  a()", "  b()", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 4, false)"))
   keys("u")
   eq(ORIGINAL, buffer(), "after two undos")
+end)
+
+test("a follow-up sends the code as it is now: after an edit, hand edits and a line added above", function()
+  local log = setup({ "EDIT\n  a()\n  b()\n", "ANSWER\nok" })
+  ask()
+  keys("go<CR>")
+  wait("return answered(1)", "the edit")
+  keys("<C-o>")
+  keys("3GA -- by hand<Esc>ggOtop<Esc>")
+  keys(" ai")
+  eq("  [No Name] · L3–4 · 2 lines", floats()["float-claude-transcript"].lines[2], "the header follows")
+  keys("and now?<CR>")
+  wait("return answered(2)", "the answer")
+  local msg = sent(log)[3]
+  assert(vim.startswith(msg, "The current version of the code (it replaces every earlier version):\n"), msg)
+  assert(msg:find("<context>\ntop\nfunction f(nums)\n  a()\n  b() -- by hand\nend\n", 1, true), msg)
+  assert(msg:find("Selected lines 3-4:\n<selection>\n  a()\n  b() -- by hand\n</selection>\nRequest: and now?", 1, true), msg)
 end)
 
 test("leaving the popup while an edit streams: the edit finishes, the popup stays", function()

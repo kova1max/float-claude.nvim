@@ -63,7 +63,9 @@ local function wrap(text, width)
   return out
 end
 
-local function first_message(s, prompt)
+-- The request with the selected lines and their context as they are now. A
+-- follow-up says so: the code may have changed since the last message.
+local function message(s, prompt, followup)
   local buf = s.buf
   local name = vim.api.nvim_buf_get_name(buf)
   name = name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":~:.")
@@ -73,7 +75,8 @@ local function first_message(s, prompt)
   local function lines(a, b)
     return table.concat(vim.api.nvim_buf_get_lines(buf, a - 1, b, false), "\n")
   end
-  return table.concat({
+  local intro = followup and "The current version of the code (it replaces every earlier version):\n" or ""
+  return intro .. table.concat({
     string.format("File: %s (filetype: %s)", name, ft == "" and "none" or ft),
     string.format("Lines %d-%d of the file, for context:", from, to),
     "<context>",
@@ -183,20 +186,30 @@ function M.open(opts)
   local cursor_pos = vim.fn.screenpos(s.win, s.cursor[1], s.cursor[2] + 1)
   local cursor_row, cursor_col = cursor_pos.row - 1, cursor_pos.col - 1
 
+  -- The selected lines are an extmark, so they follow changes made since: typing
+  -- in them, lines added or removed above them. Highlighted if from Visual mode.
   local function set_selection()
-    if not opts.selected then
-      return
-    end
     local count = vim.api.nvim_buf_line_count(s.buf)
     local last_line = vim.api.nvim_buf_get_lines(s.buf, s.last - 1, s.last, false)[1]
     s.sel_mark = vim.api.nvim_buf_set_extmark(s.buf, ns, s.first - 1, 0, {
       end_row = s.last < count and s.last or s.last - 1,
       end_col = s.last < count and 0 or #last_line,
-      hl_group = "FloatClaudeSelection",
+      hl_group = opts.selected and "FloatClaudeSelection" or nil,
       priority = 200,
     })
   end
   set_selection()
+
+  -- Read the selected lines back from the extmark (all of them deleted: the
+  -- line that took their place).
+  local function sync_selection()
+    local m = vim.api.nvim_buf_is_loaded(s.buf) and vim.api.nvim_buf_get_extmark_by_id(s.buf, ns, s.sel_mark, { details = true })
+    if m and m[1] then
+      local row, end_row, end_col = m[1], m[3].end_row, m[3].end_col
+      s.first = row + 1
+      s.last = math.max(end_col == 0 and end_row > row and end_row or end_row + 1, s.first)
+    end
+  end
 
   local function float_win(buf, enter)
     local win = vim.api.nvim_open_win(buf, enter, {
@@ -311,6 +324,9 @@ function M.open(opts)
   local function layout()
     if closed then
       return
+    end
+    if not editing then -- an edit sets the selection once it is over
+      sync_selection()
     end
     local width = math.max(math.min(opts.width, vim.o.columns), 1)
 
@@ -583,6 +599,7 @@ function M.open(opts)
     end
     local ex = s.exchanges[#s.exchanges]
     ex.edit = true
+    sync_selection()
     editing = edit.start({
       buf = s.buf,
       win = s.win,
@@ -662,9 +679,10 @@ function M.open(opts)
     if text == "" or streaming() then
       return
     end
-    local message = #s.exchanges == 0 and first_message(s, text) or text
+    sync_selection()
+    local msg = message(s, text, #s.exchanges > 0)
     if s.discarded then
-      message = "(I discarded your last EDIT; the selected lines are unchanged.)\n" .. message
+      msg = "(I discarded your last EDIT.)\n" .. msg
       s.discarded = false
     end
     table.insert(s.exchanges, { q = text, a = "", done = false })
@@ -681,7 +699,7 @@ function M.open(opts)
         layout()
       end
     end))
-    proc.send(message)
+    proc.send(msg)
   end
 
   -- Scroll the transcript from the input. Scrolling down when it cannot go

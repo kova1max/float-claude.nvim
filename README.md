@@ -71,7 +71,7 @@ With `review_edits = true`, an edit is not applied straight away. It shows as an
 
 The popup stays open either way, so you can keep asking. Hiding or leaving the popup keeps the diff waiting; closing the popup before deciding discards the edit.
 
-Claude gets the file name and filetype, the selected lines, and up to 40 lines around them. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
+Claude gets the file name and filetype, the selected lines, and up to 40 lines around them. Every follow-up sends them again as they are at that moment, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
 
 Because no settings files are loaded, your Claude Code hooks, `CLAUDE.md` files and `settings.json` are not used. Auth must come from your normal `claude` login or from environment variables such as `ANTHROPIC_API_KEY` or `CLAUDE_CODE_USE_BEDROCK` set in the shell Neovim runs in; provider settings or an `apiKeyHelper` in `settings.json` are not read.
 
