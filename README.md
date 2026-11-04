@@ -40,18 +40,27 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | Key | Where | Action |
 |---|---|---|
 | `<leader>ai` | Visual | Ask about the selected lines (any Visual mode; whole lines are used) |
-| `<leader>ai` | Normal | Ask about the current line (not highlighted) |
+| `<leader>ai` | Normal | Back to the open popup (shown again if hidden); with none open, ask about the current line (not highlighted) |
 | `<CR>` | Popup | Send the prompt |
 | `<S-CR>` or `<C-j>` | Popup | New line in the prompt (use `<C-j>` if your terminal does not send Shift-Enter) |
 | `<C-u>` / `<C-d>`, mouse wheel, `<Up>` / `<Down>` | Popup | Scroll the conversation (in a multi-line prompt the arrows first move between its lines) |
-| `<Esc>` | Popup, or while an edit streams | Close and cancel the request; a half-written edit is undone |
+| `<Esc>` | Popup, or while an edit streams | Close and end the conversation; a half-written edit is undone |
+| `<C-q>` | Popup | Hide it; the conversation goes on in the background |
+| `<C-o>` | Popup | Back to the code; the popup stays on screen |
 | `<leader>yy` / `<leader>nn` | Popup, with `review_edits` | Accept / discard the edit shown as a diff |
 
 The popup has a fixed width (see `width` below) and grows downwards with the conversation; a longer prompt or answer wraps onto more rows, never scrolling sideways.
 
 The conversation scrolls like a chat: once it no longer fits, each new question moves to the top of the popup and the answer streams in below it, following the newest line. Scroll back and the view stays put while the answer streams and while you type the next prompt; scroll down again to follow. The history is read-only. While a reply streams, the cursor sits in the conversation, so Normal-mode motions scroll it too; `<Esc>` or `q` closes. With `mouse` off (as with hardtime.nvim), most terminals send the wheel as arrow keys, so the wheel still scrolls.
 
-Leaving the popup (focusing another window) closes it and cancels an answer; an edit that is already streaming finishes in the buffer.
+### Hiding and leaving the popup
+
+The popup does not have to be in the way, and does not have to go away:
+
+- `<C-q>` hides it and puts you back in the code. The conversation goes on: an answer keeps streaming and an edit keeps writing while it is hidden.
+- `<C-o>` (or leaving it any other way: another window, a split, another file) puts you back in the code with the popup still on screen, on top of whatever is shown there. It stays where it opened (top-right, or at the cursor it opened at) and answers keep streaming into it.
+
+`<leader>ai` in Normal mode brings you back into it, showing it first if hidden, with the same conversation and scroll position. A new Visual selection with `<leader>ai` starts a fresh chat in its place. `<Esc>` in the popup (or `:q` in it) closes it and ends the conversation. Files never open inside the popup; `:e` there is refused.
 
 ### Reviewing edits
 
@@ -60,7 +69,7 @@ With `review_edits = true`, an edit is not applied straight away. It shows as an
 - `<leader>yy` accepts: the new lines are written, and one `u` brings back the original.
 - `<leader>nn` discards: the buffer is exactly as before, and Claude is told with your next message.
 
-The popup stays open either way, so you can keep asking. Closing or leaving the popup before deciding discards the edit.
+The popup stays open either way, so you can keep asking. Hiding or leaving the popup keeps the diff waiting; closing the popup before deciding discards the edit.
 
 Claude gets the file name and filetype, the selected lines, and up to 40 lines around them. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
 
@@ -77,6 +86,8 @@ require("float-claude").setup({
   review_edits = false, -- true: show an edit as a diff and apply it only once accepted
   accept_key = "<leader>yy", -- with review_edits: accept the diff (Normal mode, in the popup)
   discard_key = "<leader>nn", -- with review_edits: discard it
+  hide_key = "<C-q>", -- in the popup (Insert and Normal mode): hide it, the conversation goes on
+  unfocus_key = "<C-o>", -- in the popup: back to the code, the popup stays on screen
 })
 ```
 

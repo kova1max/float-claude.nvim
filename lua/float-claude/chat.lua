@@ -6,6 +6,8 @@ local util = require("float-claude.util")
 
 local M = {}
 
+local active -- the open popup, if any: { focus = fun(), close = fun() }
+
 local ns = vim.api.nvim_create_namespace("float-claude")
 local PREFIX = 4 -- "  ❯ " / "    " before every text line: 2 columns of padding, then the prompt
 local SPINNER = { "◐", "◓", "◑", "◒" }
@@ -122,9 +124,7 @@ local function transcript_keymaps(s, close)
     end
   end
   for _, lhs in ipairs({ "<Esc>", "q" }) do
-    vim.keymap.set("n", lhs, function()
-      close(true)
-    end, { buffer = s.tbuf, nowait = true })
+    vim.keymap.set("n", lhs, close, { buffer = s.tbuf, nowait = true })
   end
   for _, lhs in ipairs({ "i", "a", "<CR>" }) do
     vim.keymap.set("n", lhs, to_input, { buffer = s.tbuf, nowait = true })
@@ -147,13 +147,18 @@ local function header(s, width)
 end
 
 ---Open the popup for lines `first`..`last` of the current window's buffer.
----@param opts { first: integer, last: integer, selected: boolean, cmd: string[], width: integer, placement: string, review_edits: boolean, accept_key: string, discard_key: string }
+---@param opts { first: integer, last: integer, selected: boolean, cmd: string[], width: integer, placement: string, review_edits: boolean, accept_key: string, discard_key: string, hide_key: string, unfocus_key: string }
 ---  `selected` is true when the lines come from a Visual selection; they stay
 ---  highlighted while the popup is open. `placement` is "top-right" (pinned to
 ---  the editor's top-right corner) or "cursor" (1 row below, 3 columns right of it).
 ---  With `review_edits`, an edit shows as a diff until `accept_key` or
----  `discard_key` is pressed in the popup.
+---  `discard_key` is pressed in the popup. `hide_key` hides the popup and
+---  `unfocus_key` leaves it on screen; either way the conversation goes on,
+---  and M.focus() comes back to it. A popup already open is closed first.
 function M.open(opts)
+  if active then
+    active.close()
+  end
   set_highlights()
   local s = {
     win = vim.api.nvim_get_current_win(),
@@ -164,7 +169,11 @@ function M.open(opts)
     exchanges = {}, -- { q = string, a = string, done = boolean, edit = boolean?, note = string? }
     follow = true,
     frame = 1,
+    hidden = false,
   }
+  -- The window (and its buffer) the popup was last entered from; `cursor` is
+  -- its cursor then. Closing the popup goes back there.
+  s.from, s.from_buf = s.win, s.buf
 
   local closed = false
   local proc, editing, reviewing, spin_timer -- reviewing: the edit whose diff waits for a decision
@@ -202,6 +211,7 @@ function M.open(opts)
       noautocmd = true,
     })
     vim.wo[win].wrap = false
+    vim.wo[win].winfixbuf = true -- :e, a jump or a picker opens files elsewhere, not here
     vim.wo[win].scrolloff = 0
     vim.wo[win].sidescrolloff = 0
     vim.wo[win].fillchars = "eob: "
@@ -391,7 +401,8 @@ function M.open(opts)
       col = col,
       width = width,
       height = math.max(th, 1),
-      hide = th == 0,
+      hide = s.hidden or th == 0,
+      focusable = not s.hidden,
     })
     vim.api.nvim_win_set_config(s.iwin, {
       relative = "editor",
@@ -400,7 +411,8 @@ function M.open(opts)
       width = iwidth,
       border = pad,
       height = math.max(ih, 1),
-      hide = ih == 0,
+      hide = s.hidden or ih == 0,
+      focusable = not s.hidden,
     })
 
     -- A new row scrolls the still-short input before it grows; undo that once
@@ -432,18 +444,34 @@ function M.open(opts)
     end
   end
 
-  local function restore_focus()
-    if vim.api.nvim_win_is_valid(s.win) then
-      vim.api.nvim_set_current_win(s.win)
-      -- The buffer may have shrunk meanwhile (e.g. reloaded from disk).
-      s.cursor[1] = math.min(s.cursor[1], vim.api.nvim_buf_line_count(s.buf))
-      vim.api.nvim_win_set_cursor(s.win, s.cursor)
+  local function focused()
+    local cur = vim.api.nvim_get_current_win()
+    return cur == s.iwin or cur == s.twin
+  end
+
+  -- Focus the window the popup was entered from (or another editor window if
+  -- it is gone), in Normal mode. Its cursor stays put, or with `restore` goes
+  -- back to where it was when the popup was entered.
+  local function leave(restore)
+    local win = s.from
+    if not vim.api.nvim_win_is_valid(win) then
+      win = vim.iter(vim.api.nvim_tabpage_list_wins(0)):find(function(w)
+        return vim.api.nvim_win_get_config(w).relative == ""
+      end)
     end
+    local buf = vim.api.nvim_win_get_buf(win)
+    local cursor = vim.api.nvim_win_get_cursor(win)
+    if restore and win == s.from and buf == s.from_buf then
+      -- The buffer may have shrunk meanwhile (e.g. reloaded from disk).
+      cursor = { math.min(s.cursor[1], vim.api.nvim_buf_line_count(buf)), s.cursor[2] }
+    end
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, cursor)
     vim.cmd("stopinsert")
     -- Leaving Insert mode moves the cursor one cell left; put it back once that happened.
     vim.schedule(function()
-      if vim.api.nvim_win_is_valid(s.win) and vim.api.nvim_win_get_buf(s.win) == s.buf then
-        pcall(vim.api.nvim_win_set_cursor, s.win, s.cursor)
+      if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf then
+        pcall(vim.api.nvim_win_set_cursor, win, cursor)
       end
     end)
   end
@@ -465,11 +493,15 @@ function M.open(opts)
     end
   end
 
-  ---Close the popup and cancel any request. `refocus` is false when the user left
-  ---on their own; an edit that is streaming then finishes without the popup.
-  close = function(refocus)
+  ---Close the popup and end the conversation: a streaming edit is undone, a
+  ---diff waiting for review discarded. Focus, if in the popup, goes back.
+  close = function()
     if closed then
       return
+    end
+    local refocus = focused()
+    if active and active.close == close then
+      active = nil
     end
     close_windows()
     if reviewing then
@@ -477,9 +509,6 @@ function M.open(opts)
       reviewing = nil
     end
     if editing then
-      if not refocus and not opts.review_edits then
-        return
-      end
       editing.cancel()
     end
     if proc then
@@ -487,7 +516,7 @@ function M.open(opts)
     end
     clear_selection()
     if refocus then
-      restore_focus()
+      leave(true)
     end
   end
 
@@ -495,7 +524,7 @@ function M.open(opts)
     if editing then
       editing.cancel(msg)
     else
-      close(true)
+      close()
       util.error(msg)
     end
     if proc then
@@ -509,16 +538,11 @@ function M.open(opts)
     local handle = editing
     editing, reviewing = nil, nil
     local note = result and result.old and string.format("refactored %d → %d lines · u to undo", result.old, result.new)
-    if closed then -- the user left while it streamed
-      clear_selection()
-      proc.stop()
-      if note then
-        vim.api.nvim_echo({ { note } }, true, {})
-      end
+    if closed then -- cancelled by close()
       return
     end
     if not result then
-      return close(true)
+      return close()
     end
     if result.pending then
       reviewing = handle
@@ -533,7 +557,9 @@ function M.open(opts)
     else
       -- Follow-ups work on the new lines.
       s.last = s.first + result.new - 1
-      s.cursor = vim.api.nvim_win_get_cursor(s.win)
+      if s.from == s.win and vim.api.nvim_win_is_valid(s.win) and vim.api.nvim_win_get_buf(s.win) == s.buf then
+        s.from_buf, s.cursor = s.buf, vim.api.nvim_win_get_cursor(s.win) -- on the new lines
+      end
       clear_selection()
       set_selection()
     end
@@ -541,12 +567,17 @@ function M.open(opts)
     ex.done = true
     stop_spinner()
     layout()
-    vim.api.nvim_set_current_win(s.iwin)
-    vim.cmd("startinsert")
+    if focused() then
+      vim.api.nvim_set_current_win(s.iwin)
+      vim.cmd("startinsert")
+    end
   end
 
   -- The popup stays open while the reply streams into the selected lines.
   local function start_edit(code)
+    if not vim.api.nvim_buf_is_loaded(s.buf) then
+      return fail("the buffer was unloaded")
+    end
     if not vim.bo[s.buf].modifiable then
       return fail("the buffer is not modifiable")
     end
@@ -620,8 +651,10 @@ function M.open(opts)
     ex.done = true
     stop_spinner()
     layout()
-    vim.api.nvim_set_current_win(s.iwin)
-    vim.cmd("startinsert")
+    if focused() then
+      vim.api.nvim_set_current_win(s.iwin)
+      vim.cmd("startinsert")
+    end
   end
 
   local function submit()
@@ -672,9 +705,7 @@ function M.open(opts)
   map({ "i", "n" }, "<CR>", submit)
   map("i", "<S-CR>", "<CR>")
   map("i", "<C-j>", "<CR>")
-  map({ "i", "n" }, "<Esc>", function()
-    close(true)
-  end)
+  map({ "i", "n" }, "<Esc>", close)
   map({ "i", "n" }, "<C-u>", function()
     scroll("<C-u>")
   end)
@@ -726,22 +757,52 @@ function M.open(opts)
     end
   end
 
+  -- Hidden or unfocused, the conversation goes on; enter() comes back to it.
+  local function enter()
+    if not focused() then
+      s.from, s.from_buf, s.cursor = vim.api.nvim_get_current_win(), vim.api.nvim_get_current_buf(),
+        vim.api.nvim_win_get_cursor(0)
+    end
+    s.hidden = false
+    layout()
+    if streaming() then -- the cursor sits in the conversation, as after sending
+      vim.api.nvim_set_current_win(s.twin)
+      vim.cmd("stopinsert")
+    else
+      vim.api.nvim_set_current_win(s.iwin)
+      vim.cmd("startinsert!")
+    end
+  end
+  for key, hide in pairs({ [opts.hide_key] = true, [opts.unfocus_key] = false }) do
+    local function run()
+      if focused() then
+        leave(false)
+      end
+      s.hidden = hide
+      layout()
+    end
+    local desc = hide and "float-claude: hide the popup" or "float-claude: back to the code, popup stays"
+    vim.keymap.set({ "i", "n" }, key, run, { buffer = s.ibuf, nowait = true, desc = desc })
+    vim.keymap.set("n", key, run, { buffer = s.tbuf, nowait = true, desc = desc })
+  end
+
   vim.api.nvim_create_autocmd(
     { "TextChanged", "TextChangedI", "TextChangedP" },
     { group = group, buffer = s.ibuf, callback = layout }
   )
-  vim.api.nvim_create_autocmd("WinLeave", {
+  -- Closed some other way (:q, :only): the conversation ends.
+  vim.api.nvim_create_autocmd("WinClosed", {
     group = group,
-    callback = function()
-      vim.schedule(function()
-        local cur = vim.api.nvim_get_current_win()
-        if not closed and cur ~= s.iwin and cur ~= s.twin then
-          close(false) -- the user went elsewhere: cancel, leave focus where it went
-        end
-      end)
+    callback = function(ev)
+      local win = tonumber(ev.match)
+      if win == s.iwin or win == s.twin then
+        vim.schedule(close)
+      end
     end,
   })
+  vim.api.nvim_create_autocmd("BufWipeout", { group = group, buffer = s.buf, callback = close })
 
+  active = { focus = enter, close = close }
   -- Start the CLI now so its startup overlaps with typing the prompt.
   local err
   proc, err = claude.start({ cmd = opts.cmd, on_delta = on_delta, on_done = on_done, on_error = fail })
@@ -751,6 +812,16 @@ function M.open(opts)
   layout()
   vim.cmd("startinsert")
   return s
+end
+
+---Focus the open popup, showing it first if hidden.
+---@return boolean focused false when no popup is open
+function M.focus()
+  if not active then
+    return false
+  end
+  active.focus()
+  return true
 end
 
 return M

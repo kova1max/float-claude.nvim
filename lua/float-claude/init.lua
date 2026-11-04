@@ -15,9 +15,14 @@ local config = {
   -- With review_edits: the keys, in the popup, that accept or discard the diff.
   accept_key = "<leader>yy",
   discard_key = "<leader>nn",
+  -- Keys in the popup (Insert and Normal mode): hide it, or go back to the code
+  -- leaving it on screen. The conversation goes on; `keymap` comes back to it.
+  hide_key = "<C-q>",
+  unfocus_key = "<C-o>",
 }
 
----Open the popup for the selected lines (Visual mode) or the current line (Normal mode).
+---Open the popup for the selected lines (Visual mode). In Normal mode, focus the
+---open popup (showing it if hidden), or open one for the current line.
 function M.ask()
   local first, last = vim.fn.line("v"), vim.fn.line(".")
   local selected = vim.fn.mode():match("^[vV\22]") ~= nil
@@ -26,7 +31,12 @@ function M.ask()
   else
     first = last
   end
-  require("float-claude.chat").open({
+  local chat = require("float-claude.chat")
+  -- A selection in the popup itself is not a new chat.
+  if (not selected or vim.startswith(vim.bo.filetype, "float-claude")) and chat.focus() then
+    return
+  end
+  chat.open({
     first = math.min(first, last),
     last = math.max(first, last),
     selected = selected,
@@ -36,6 +46,8 @@ function M.ask()
     review_edits = config.review_edits,
     accept_key = config.accept_key,
     discard_key = config.discard_key,
+    hide_key = config.hide_key,
+    unfocus_key = config.unfocus_key,
   })
 end
 
