@@ -251,6 +251,24 @@ test("the prompt wraps where the sent question does; the cursor stays inside the
   eq({ "  ❯ " .. string.rep("x", 45), "    y" }, vim.list_slice(turns(), 1, 2), "same rows once sent")
 end)
 
+test("the prompt wraps a mention like the sent question: at a space, not inside its path", function()
+  setup({ "ANSWER\nok" })
+  ask()
+  local f = floats()["float-claude"]
+  -- "@lua/api.lua" does not fit after these 34 cells; 'breakat' would split it after "@lua/api.".
+  keys("does this match how it is used in @lua/api.lua and more")
+  eq({ f.row + 2, f.col + 5 }, lua("local p = vim.fn.screenpos(0, 1, 35) return { p.row, p.col }"), "the mention starts row 2")
+  keys("<C-o>")
+  eq(vim.o.breakat, lua("return vim.o.breakat"), "the user's 'breakat' back in the code")
+  keys(" ai")
+  eq({ "float-claude", " " }, lua("return { vim.bo.filetype, vim.o.breakat }"), "back in the prompt")
+  keys("<CR>")
+  wait("return answered(1)", "the answer")
+  eq({ "  ❯ does this match how it is used in", "    @lua/api.lua and more" }, vim.list_slice(turns(), 1, 2), "same rows once sent")
+  keys("<Esc>q")
+  eq(vim.o.breakat, lua("return vim.o.breakat"), "the user's 'breakat' back once closed")
+end)
+
 test("an unbroken prompt filling two rows keeps its wrapping; the cursor goes under the text", function()
   setup()
   ask()

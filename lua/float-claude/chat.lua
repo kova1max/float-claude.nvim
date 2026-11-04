@@ -366,6 +366,24 @@ function M.open(opts)
   vim.wo[s.iwin].breakindent = true
   vim.wo[s.iwin].breakindentopt = "shift:" .. PREFIX
   vim.wo[s.iwin].showbreak = "NONE"
+  -- Rows break only at spaces, as in the sent question, so a mention's path is
+  -- not split. 'breakat' is global: set while the prompt is current.
+  local user_breakat
+  local function prompt_breakat(on)
+    if on and not user_breakat then
+      user_breakat, vim.o.breakat = vim.o.breakat, " "
+    elseif not on and user_breakat then
+      vim.o.breakat, user_breakat = user_breakat, nil
+    end
+  end
+  prompt_breakat(true) -- opened with noautocmd
+  vim.api.nvim_create_autocmd({ "WinEnter", "WinLeave" }, {
+    group = group,
+    buffer = s.ibuf,
+    callback = function(ev)
+      prompt_breakat(ev.event == "WinEnter")
+    end,
+  })
 
   local function streaming()
     local ex = s.exchanges[#s.exchanges]
@@ -650,6 +668,7 @@ function M.open(opts)
     closed = true
     stop_spinner()
     vim.api.nvim_del_augroup_by_id(group)
+    prompt_breakat(false)
     for _, win in pairs({ transcript = s.twin, input = s.iwin }) do
       if vim.api.nvim_win_is_valid(win) then
         vim.api.nvim_win_close(win, true)
