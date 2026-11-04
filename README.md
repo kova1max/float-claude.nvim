@@ -4,7 +4,7 @@ Neovim: select code, press a key, and ask Claude in a small popup pinned to the 
 Select some lines, press `<leader>ai`, type a prompt in the borderless popup, and press Enter. The popup is pinned to the editor's top-right corner (or opens next to the cursor, see `placement`); the selection stays highlighted while it is open. Claude decides what the prompt needs:
 
 - **Edit**: "use a hash map, one pass". The selected lines are rewritten in place, streaming in line by line with the new lines briefly highlighted. The popup stays open with a note that the edit was applied, so you can keep going ("also rename x"); a follow-up edit works on the lines as they are now. Each edit is one `u` in the buffer.
-- **Answer**: "what's the time complexity?". The answer streams into the popup and you can keep asking follow-ups ("can it be O(n)?"). A follow-up can also ask for an edit of the selection.
+- **Answer**: "what's the time complexity?". The answer streams into the popup and you can keep asking follow-ups ("can it be O(n)?"). Code in it is syntax-highlighted, and with LSP the names in it jump to their definitions (see [Code in answers](#code-in-answers)). A follow-up can also ask for an edit of the selection.
 
 ```
   test.js · L7–13 · 7 lines
@@ -48,6 +48,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `<C-q>` | Popup | Hide it; the conversation goes on in the background |
 | `<C-o>` | Popup | Back to the code; the popup stays on screen |
 | `<leader>yy` / `<leader>nn` | Popup, with `review_edits` | Accept / discard the edit shown as a diff |
+| `<CR>` or a click / `K` | Conversation, on an underlined name | Jump to its definition in the code window / show its hover (see below) |
 
 The popup has a fixed width (see `width` below) and grows downwards with the conversation; a longer prompt or answer wraps onto more rows, never scrolling sideways.
 
@@ -61,6 +62,12 @@ The popup does not have to be in the way, and does not have to go away:
 - `<C-o>` (or leaving it any other way: another window, a split, another file) puts you back in the code with the popup still on screen, on top of whatever is shown there. It stays where it opened (top-right, or at the cursor it opened at) and answers keep streaming into it.
 
 `<leader>ai` in Normal mode brings you back into it, showing it first if hidden, with the same conversation and scroll position. A new Visual selection with `<leader>ai` starts a fresh chat in its place. `<Esc>` in the popup (or `:q` in it) closes it and ends the conversation. Files never open inside the popup; `:e` there is refused.
+
+### Code in answers
+
+Answers put names from the code in `inline code` and snippets in fenced code blocks. The popup shows them without the backticks and fences: inline code on a slightly lighter background, and both syntax-highlighted with treesitter in the file's language (or the language a fence names). Without a treesitter parser for the language the code stays plain; Neovim ships parsers for Lua, Vim script, C, Markdown and a few more, and others (JavaScript, TypeScript, ...) come from e.g. [nvim-treesitter](https://github.com/nvim-treesitter/nvim-treesitter). A code line too long for the popup is cut onto the next row.
+
+With an LSP server attached to the file, names in the code (inline code and code blocks) that the server knows are underlined: the definition at the name's occurrence in the file (in the selected lines first), or else a workspace symbol of that name. They are looked up in the background, so answers never wait for the server; a name shows underlined once found. In the conversation (`<C-w>w` from the prompt, or a click), `<CR>` or a click on an underlined name jumps to its definition in the code window, with the popup staying on screen, and `K` shows the server's hover for it. Names the server does not know stay plain, and without LSP nothing is underlined.
 
 ### Reviewing edits
 
@@ -102,10 +109,12 @@ Colors come from highlight groups defined with `default = true`, so a colorschem
 | `FloatClaudeSelection` | links to `Visual` | the selected lines while the popup or an edit is active |
 | `FloatClaudeAdded` | `bg = #12301f` | freshly written lines, added lines in a review diff |
 | `FloatClaudeRemoved` | `bg = #3a1d22` | removed lines in a review diff |
+| `FloatClaudeCode` | `bg = #2a2a2f` | inline code in answers |
+| `FloatClaudeLink` | `underline = true` | names in answers that resolve through LSP |
 
 ## Development
 
-Run the tests (headless; a fake CLI stands in for Claude, so no network or account is needed):
+Run the tests (headless; a fake CLI stands in for Claude and a fake LSP server for a language server, so no network or account is needed):
 
 ```sh
 nvim --clean --headless -l tests/run.lua

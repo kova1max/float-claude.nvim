@@ -714,6 +714,155 @@ test("answer: the tag may share its line with the answer, split across deltas", 
   }, turns())
 end)
 
+-- An LSP server in the child, attached to buffer 1 (named demo.lua): `defs`
+-- maps a name to its definition { line, character } (both 0-based) and
+-- answers textDocument/definition for the name at the given position; `symbols`
+-- does the same for workspace/symbol. Hover shows "hover: <name>".
+local function fake_lsp(defs, symbols)
+  lua([[
+    local defs, symbols = ...
+    vim.api.nvim_buf_set_name(1, vim.fn.getcwd() .. "/demo.lua")
+    local function location(uri, at)
+      return { uri = uri, range = { start = { line = at[1], character = at[2] }, ["end"] = { line = at[1], character = at[2] } } }
+    end
+    vim.lsp.start({ name = "fake", cmd = function()
+      local closing, id = false, 0
+      return {
+        request = function(method, params, callback)
+          id = id + 1
+          local result = vim.NIL
+          local name
+          if params and params.position then
+            local line = vim.api.nvim_buf_get_lines(1, params.position.line, params.position.line + 1, false)[1]
+            name = line:sub(params.position.character + 1):match("^[%w_]+")
+          end
+          if method == "initialize" then
+            result = { capabilities = { definitionProvider = true, hoverProvider = true, workspaceSymbolProvider = true } }
+          elseif method == "textDocument/definition" then
+            result = defs[name] and location(params.textDocument.uri, defs[name]) or {}
+          elseif method == "workspace/symbol" then
+            local at = symbols[params.query]
+            result = at and { { name = params.query, kind = 12, location = location(vim.uri_from_bufnr(1), at) } } or {}
+          elseif method == "textDocument/hover" then
+            result = { contents = { kind = "markdown", value = "hover: " .. name } }
+          end
+          vim.schedule(function() callback(nil, result) end)
+          return true, id
+        end,
+        notify = function(method)
+          closing = closing or method == "exit"
+          return true
+        end,
+        is_closing = function() return closing end,
+        terminate = function() closing = true end,
+      }
+    end }, { bufnr = 1 })
+  ]], defs, symbols)
+end
+
+-- The transcript's highlights as { row (1-based), text under it, group }.
+local function transcript_hls()
+  return lua([[
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.bo[b].filetype == "float-claude-transcript" then
+        local out = {}
+        for _, m in ipairs(vim.api.nvim_buf_get_extmarks(b, -1, 0, -1, { details = true })) do
+          local line = vim.api.nvim_buf_get_lines(b, m[2], m[2] + 1, false)[1]
+          table.insert(out, { m[2] + 1, line:sub(m[3] + 1, m[4].end_col), m[4].hl_group })
+        end
+        return out
+      end
+    end
+  ]])
+end
+
+local CODE_ANSWER = "ANSWER\nUse `f` with `nums`; `missing` is unknown.\n```lua\nlocal n = f(nums)\n```\n"
+
+test("answer: inline code and code blocks show without backticks and fences, highlighted", function()
+  setup({ CODE_ANSWER })
+  ask()
+  keys("explain<CR>")
+  wait("return answered(1)", "the answer")
+  eq({ "  ❯ explain", "    Use f with nums; missing is unknown.", "    local n = f(nums)", "" }, turns())
+  local hls = transcript_hls()
+  local function has(entry)
+    return vim.iter(hls):any(function(h)
+      return vim.deep_equal(h, entry)
+    end)
+  end
+  for _, span in ipairs({ "f", "nums", "missing" }) do
+    assert(has({ 4, span, "FloatClaudeCode" }), "inline code " .. span .. ": " .. vim.inspect(hls))
+  end
+  assert(has({ 5, "local", "@keyword.lua" }), "the code block, in the source's language: " .. vim.inspect(hls))
+  eq(false, vim.iter(hls):any(function(h)
+    return h[3] == "FloatClaudeLink"
+  end), "no LSP, no links")
+  eq("", lua("return vim.v.errmsg"), "no errors")
+end)
+
+test("answer: a fence names the language; code too long for a row is cut, not wrapped at words", function()
+  setup()
+  local function render(text, done)
+    return lua([[return require("float-claude.answer").render(..., { width = 20, done = ]] .. tostring(done)
+      .. [[, cache = {}, tabstop = 8 })]], text)
+  end
+  eq({ { text = "say `hi", hls = {}, names = {} } }, render("say `hi", true), "an unclosed backtick is text")
+  eq({ { text = "say hi", hls = { { 4, 6, "FloatClaudeCode", 90 } }, names = {} } }, render("say `hi", false),
+    "unless the line is still streaming")
+  local rows = lua([[return require("float-claude.answer").render(
+    "a `x y` b\n```vim\nlet g:abc = 1\n```", { width = 6, lang = "lua", done = true, cache = {}, tabstop = 8 })]])
+  eq({ "a x y", "b", "let g:", "abc = ", "1" }, vim.tbl_map(function(r)
+    return r.text
+  end, rows), "rows")
+  eq({ { 2, 5, "FloatClaudeCode", 90 } }, vim.tbl_filter(function(h)
+    return h[3] == "FloatClaudeCode"
+  end, rows[1].hls), "the span, spaces included")
+  eq("@keyword.vim", rows[3].hls[1][3], "highlighted as the fence's language")
+end)
+
+test("answer: names resolve through LSP; <CR> or a click jumps to the definition, K shows hover", function()
+  setup({ CODE_ANSWER })
+  -- nums: a definition at its occurrence in the selection; f: none there, a workspace symbol.
+  fake_lsp({ nums = { 0, 11 } }, { f = { 0, 9 } })
+  ask()
+  keys("explain<CR>")
+  wait("return answered(1)", "the answer")
+  local function links()
+    return vim.tbl_filter(function(h)
+      return h[3] == "FloatClaudeLink"
+    end, transcript_hls())
+  end
+  for _ = 1, 50 do
+    if #links() == 4 then
+      break
+    end
+    lua("vim.wait(20)")
+  end
+  eq({ { 4, "f" }, { 4, "nums" }, { 5, "f" }, { 5, "nums" } }, vim.tbl_map(function(h)
+    return { h[1], h[2] }
+  end, links()), "underlined names; missing and n stay plain")
+  keys("<C-\\><C-n><C-w>w")
+  eq("float-claude-transcript", lua("return vim.bo.filetype"), "in the conversation")
+  lua("vim.api.nvim_win_set_cursor(0, { 4, 15 })") -- on nums
+  keys("K")
+  wait([[return vim.iter(vim.api.nvim_list_wins()):any(function(w)
+    return vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(w), 0, -1, false)[1] == "hover: nums"
+  end)]], "the hover window")
+  keys("<CR>")
+  eq({ 1000, { 1, 11 }, "n" }, lua("return { vim.api.nvim_get_current_win(), vim.api.nvim_win_get_cursor(0), vim.fn.mode() }"),
+    "at the definition, in the code window")
+  local t = floats()["float-claude-transcript"]
+  assert(t, "the popup stays")
+  lua("vim.api.nvim_win_set_cursor(0, { 3, 0 })")
+  -- Click on the f in the code block: row 5 of the transcript, column 14.
+  vim.rpcrequest(chan, "nvim_input_mouse", "left", "press", "", 0, t.row + 4, t.col + 14)
+  vim.rpcrequest(chan, "nvim_input_mouse", "left", "release", "", 0, t.row + 4, t.col + 14)
+  lua("")
+  wait("return vim.api.nvim_get_current_win() == 1000 and vim.api.nvim_win_get_cursor(0)[2] == 9", "the jump to f")
+  eq({ 1, 9 }, lua("return vim.api.nvim_win_get_cursor(0)"), "at f's definition")
+  eq("", lua("return vim.v.errmsg"), "no errors")
+end)
+
 test("edit: the tag may share its line with the code", function()
   setup({ { "EDIT", " local n = #nums\n" } })
   ask()

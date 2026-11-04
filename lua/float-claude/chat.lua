@@ -1,7 +1,9 @@
 -- The popup, pinned top-right or next to the cursor: a read-only, scrollable
 -- conversation window (header, past turns) stacked right above the prompt input.
+local answer = require("float-claude.answer")
 local claude = require("float-claude.claude")
 local edit = require("float-claude.edit")
+local lsp = require("float-claude.lsp")
 local util = require("float-claude.util")
 
 local M = {}
@@ -23,44 +25,12 @@ local function set_highlights()
   vim.api.nvim_set_hl(0, "FloatClaudeSelection", { default = true, link = "Visual" })
   vim.api.nvim_set_hl(0, "FloatClaudeAdded", { default = true, bg = "#12301f" })
   vim.api.nvim_set_hl(0, "FloatClaudeRemoved", { default = true, bg = "#3a1d22" })
+  vim.api.nvim_set_hl(0, "FloatClaudeCode", { default = true, bg = "#2a2a2f" })
+  vim.api.nvim_set_hl(0, "FloatClaudeLink", { default = true, underline = true })
 end
 
 local function width_of(s)
   return vim.fn.strdisplaywidth(s)
-end
-
--- Word-wrap `text` to `width` display cells; words longer than a line are split.
-local function wrap(text, width)
-  width = math.max(width, 1)
-  local out = {}
-  for _, para in ipairs(vim.split(text, "\n", { plain = true })) do
-    local line = ""
-    for word in para:gmatch("%S+") do
-      while width_of(word) > width do
-        if line ~= "" then
-          table.insert(out, line)
-          line = ""
-        end
-        local n = vim.fn.strchars(word)
-        local cut = n
-        while cut > 1 and width_of(vim.fn.strcharpart(word, 0, cut)) > width do
-          cut = cut - 1
-        end
-        table.insert(out, vim.fn.strcharpart(word, 0, cut))
-        word = vim.fn.strcharpart(word, cut, n)
-      end
-      if line == "" then
-        line = word
-      elseif width_of(line) + 1 + width_of(word) <= width then
-        line = line .. " " .. word
-      else
-        table.insert(out, line)
-        line = word
-      end
-    end
-    table.insert(out, line)
-  end
-  return out
 end
 
 -- The request with the selected lines and their context as they are now. A
@@ -118,7 +88,9 @@ local function parse_tag(reply, final)
 end
 
 -- Transcript window keys: it is read-only; <Esc>/q close, i/a/<CR> go back to the input.
-local function transcript_keymaps(s, close)
+-- On a name that resolved through LSP, <CR> and a click jump to its definition
+-- and K shows hover: `on_link(action)` does that and returns true there.
+local function transcript_keymaps(s, close, on_link)
   local function to_input()
     local ex = s.exchanges[#s.exchanges]
     if not ex or ex.done then
@@ -129,9 +101,20 @@ local function transcript_keymaps(s, close)
   for _, lhs in ipairs({ "<Esc>", "q" }) do
     vim.keymap.set("n", lhs, close, { buffer = s.tbuf, nowait = true })
   end
-  for _, lhs in ipairs({ "i", "a", "<CR>" }) do
+  for _, lhs in ipairs({ "i", "a" }) do
     vim.keymap.set("n", lhs, to_input, { buffer = s.tbuf, nowait = true })
   end
+  vim.keymap.set("n", "<CR>", function()
+    if not on_link("jump") then
+      to_input()
+    end
+  end, { buffer = s.tbuf, nowait = true })
+  vim.keymap.set({ "n", "i" }, "<LeftRelease>", function()
+    on_link("jump")
+  end, { buffer = s.tbuf })
+  vim.keymap.set("n", "K", function()
+    on_link("hover")
+  end, { buffer = s.tbuf, nowait = true })
   -- Arrow keys (the wheel, with 'mouse' off) scroll.
   vim.keymap.set("n", "<Up>", "<C-y>", { buffer = s.tbuf })
   vim.keymap.set("n", "<Down>", "<C-e>", { buffer = s.tbuf })
@@ -173,7 +156,11 @@ function M.open(opts)
     follow = true,
     frame = 1,
     hidden = false,
+    ts_cache = {}, -- treesitter results for code in answers
+    links = {}, -- transcript row: { from, to, target } for names that resolved through LSP
   }
+  local ft = vim.bo[s.buf].filetype
+  s.lang = ft ~= "" and (vim.treesitter.language.get_lang(ft) or ft) or nil
   -- The window (and its buffer) the popup was last entered from; `cursor` is
   -- its cursor then. Closing the popup goes back there.
   s.from, s.from_buf = s.win, s.buf
@@ -264,11 +251,36 @@ function M.open(opts)
   -- it, a blank row). While a reply streams the prompt is hidden, so a last
   -- blank row pads the bottom.
   local function transcript(width)
-    local lines, hls = {}, {}
+    local lines, hls = {}, {} -- hls: { row, group, from?, to?, priority? }; whole row without from/to
+    s.links = {}
     local function add(text, hl)
       table.insert(lines, text)
       if hl then
         table.insert(hls, { #lines - 1, hl })
+      end
+    end
+    -- An answer's rows: code highlighted, names that resolve through LSP underlined.
+    local function add_answer(ex, text_width)
+      local rows = answer.render(ex.a, {
+        width = text_width,
+        lang = s.lang,
+        done = ex.done,
+        cache = s.ts_cache,
+        tabstop = vim.bo[s.buf].tabstop,
+      })
+      for _, row in ipairs(rows) do
+        add("    " .. row.text)
+        for _, hl in ipairs(row.hls) do
+          table.insert(hls, { #lines - 1, hl[3], hl[1] + 4, hl[2] + 4, hl[4] })
+        end
+        for _, name in ipairs(row.names) do
+          local target = s.resolve and s.resolve(name[3], name[4])
+          if target then
+            table.insert(hls, { #lines - 1, "FloatClaudeLink", name[1] + 4, name[2] + 4, 150 })
+            s.links[#lines] = s.links[#lines] or {}
+            table.insert(s.links[#lines], { name[1] + 4, name[2] + 4, target })
+          end
+        end
       end
     end
     local text_width = width - PREFIX - 1
@@ -276,19 +288,17 @@ function M.open(opts)
     add("  " .. header(s, width - 3), "FloatClaudeHeader")
     for _, ex in ipairs(s.exchanges) do
       ex.line = #lines + 1
-      for i, l in ipairs(wrap(ex.q, text_width)) do
+      for i, l in ipairs(answer.wrap(ex.q, text_width)) do
         add((i == 1 and "  ❯ " or "    ") .. l, "FloatClaudeHistory")
       end
       if ex.edit then -- the spinner rides on the lines being written
-        for _, l in ipairs(wrap(ex.note or "refactoring…", text_width)) do
+        for _, l in ipairs(answer.wrap(ex.note or "refactoring…", text_width)) do
           add("    " .. l, "FloatClaudeHistory")
         end
       elseif ex.a == "" and not ex.done then
         add("    " .. SPINNER[s.frame], "FloatClaudeHistory")
       else
-        for _, l in ipairs(wrap(ex.a, text_width)) do
-          add("    " .. l)
-        end
+        add_answer(ex, text_width)
       end
       if ex.done then
         add("")
@@ -337,7 +347,11 @@ function M.open(opts)
     vim.bo[s.tbuf].modifiable = false
     vim.api.nvim_buf_clear_namespace(s.tbuf, ns, 0, -1)
     for _, hl in ipairs(hls) do
-      vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], 0, { end_col = #tlines[hl[1] + 1], hl_group = hl[2] })
+      vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], hl[3] or 0, {
+        end_col = hl[4] or #tlines[hl[1] + 1],
+        hl_group = hl[2],
+        priority = hl[5],
+      })
       if tlines[hl[1] + 1]:sub(1, 5) == "  ❯" then
         vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], 2, { end_col = 5, hl_group = "FloatClaudePrompt", priority = 5000 })
       end
@@ -451,6 +465,7 @@ function M.open(opts)
       follow_view()
     end
   end
+  s.resolve = lsp.resolver(s, layout) -- a name found: redraw to underline it
 
   local function stop_spinner()
     if spin_timer then
@@ -763,7 +778,24 @@ function M.open(opts)
       end
     end,
   })
-  transcript_keymaps(s, close)
+  transcript_keymaps(s, close, function(action)
+    local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+    local link = vim.iter(s.links[row] or {}):find(function(l)
+      return col >= l[1] and col < l[2]
+    end)
+    if not link then
+      return false
+    end
+    if action == "hover" then
+      lsp.hover(link[3])
+    else -- in the code window; the popup stays
+      leave(false)
+      vim.schedule(function()
+        lsp.jump(link[3])
+      end)
+    end
+    return true
+  end)
   if opts.review_edits then
     -- While a diff waits the cursor sits in the conversation, in Normal mode.
     for key, accept in pairs({ [opts.accept_key] = true, [opts.discard_key] = false }) do

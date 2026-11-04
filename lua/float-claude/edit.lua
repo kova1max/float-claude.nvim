@@ -13,17 +13,6 @@ local diff_ns = vim.api.nvim_create_namespace("float-claude-diff")
 local SPINNER = { "◐", "◓", "◑", "◒" }
 local diff = vim.text and vim.text.diff or vim.diff -- vim.diff is deprecated since Neovim 0.11
 
--- `line` as it shows on screen: virtual text does not expand tabs.
-local function expand_tabs(line, tabstop)
-  local i = line:find("\t", 1, true)
-  while i do
-    local before = line:sub(1, i - 1)
-    line = before .. string.rep(" ", tabstop - vim.fn.strdisplaywidth(before) % tabstop) .. line:sub(i + 1)
-    i = line:find("\t", i, true)
-  end
-  return line
-end
-
 ---@param opts { buf: integer, win: integer, first: integer, last: integer, review: boolean?, on_end: fun(result: { old: integer, new: integer, pending: boolean? }?) }
 ---  `buf` must be modifiable.
 ---  `first`/`last` are the 1-based selected lines. `on_end` runs once the edit is
@@ -99,7 +88,7 @@ function M.start(opts)
       if b_count > 0 then
         local lines = {}
         for k = b, b + b_count - 1 do
-          local text = expand_tabs(new[k], tabstop)
+          local text = util.expand_tabs(new[k], tabstop) -- virtual text does not expand them
           -- Padded so the background spans the window like a line highlight.
           text = text .. string.rep(" ", width - vim.fn.strdisplaywidth(text))
           table.insert(lines, { { text, "FloatClaudeAdded" } })
