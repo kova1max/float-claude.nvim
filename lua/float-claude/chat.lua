@@ -325,15 +325,43 @@ function M.open(opts)
     end
     -- The prompt wraps one column short of the popup's edge, like the
     -- conversation: a 1-cell right border pads it. While the cursor sits after
-    -- a full last row, the window takes that cell so the cursor stays there.
+    -- a full last row, the window takes that cell so the cursor stays there,
+    -- unless that rewraps the rows (an unbroken word filling them): then the
+    -- cursor goes to a new row, under the text.
     local iwidth, pad = math.max(width - 1, 1), { "", "", "", " ", "", "", "", "" }
     vim.api.nvim_win_set_config(s.iwin, { width = iwidth, border = pad })
     vim.api.nvim_win_call(s.iwin, function()
       local lnum, c = unpack(vim.api.nvim_win_get_cursor(0))
       local endcol = c > 0 and c == #vim.api.nvim_get_current_line() and vim.fn.screenpos(0, lnum, c).endcol or 0
       if endcol > 0 and endcol - vim.fn.win_screenpos(0)[2] + 1 == iwidth then
-        iwidth, pad = width, "none"
-        vim.api.nvim_win_set_config(0, { width = iwidth, border = pad })
+        -- Each line's row breaks, as the virtual columns where a new row starts.
+        local function breaks()
+          local out = {}
+          for l = 1, vim.fn.line("$") do
+            local rows = 1
+            for v = 1, vim.fn.virtcol({ l, "$" }) do
+              local h = vim.api.nvim_win_text_height(0, { start_row = l - 1, end_row = l - 1, end_vcol = v }).all
+              if h > rows then
+                rows = h
+                table.insert(out, l .. ":" .. v)
+              end
+            end
+          end
+          return table.concat(out, ",")
+        end
+        local narrow = breaks()
+        vim.api.nvim_win_set_config(0, { width = width, border = "none" })
+        if breaks() == narrow then
+          iwidth, pad = width, "none"
+        else
+          vim.api.nvim_win_set_config(0, { width = iwidth, border = pad })
+          -- A cell after the text wraps onto a new row; the cursor is drawn before it.
+          vim.api.nvim_buf_set_extmark(s.ibuf, ns, lnum - 1, c, {
+            virt_text = { { " ", "FloatClaudeNormal" } },
+            virt_text_pos = "inline",
+            right_gravity = true,
+          })
+        end
       end
     end)
     -- The input's height is its rows once wrapped, plus a padding row.

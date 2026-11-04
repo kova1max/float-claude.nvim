@@ -196,12 +196,12 @@ test("the popup has a fixed width; a long prompt wraps onto more rows", function
   -- Heights count a padding row under the prompt.
   keys(string.rep("x", 30))
   eq({ 50, 2 }, { floats()["float-claude"].width, floats()["float-claude"].height }, "short prompt")
-  keys(string.rep("x", 60))
+  keys(string.rep("x", 30))
   eq({ 50, 3, 1 }, { floats()["float-claude"].width, floats()["float-claude"].height, floats()["float-claude"].top }, "wrapped")
   eq(0, lua("return vim.fn.winsaveview().leftcol"), "no sideways scroll")
   -- The wrapped row lines up with the text above it, after the prefix.
-  eq({ f.row + 2, f.col + 5 }, lua("local p = vim.fn.screenpos(0, 1, 47) return { p.row, p.col }"), "wrapped text position")
-  keys(string.rep(" word", 5))
+  eq({ f.row + 2, f.col + 5 }, lua("local p = vim.fn.screenpos(0, 1, 46) return { p.row, p.col }"), "wrapped text position")
+  keys(string.rep(" word", 7))
   eq({ 50, 4 }, { floats()["float-claude"].width, floats()["float-claude"].height }, "words wrap too")
 end)
 
@@ -218,6 +218,21 @@ test("the prompt wraps where the sent question does; the cursor stays inside the
   keys("<CR>")
   wait("return answered(1)", "the answer")
   eq({ "  ❯ " .. string.rep("x", 45), "    y" }, vim.list_slice(turns(), 1, 2), "same rows once sent")
+end)
+
+test("an unbroken prompt filling two rows keeps its wrapping; the cursor goes under the text", function()
+  setup()
+  ask()
+  local f = floats()["float-claude"]
+  keys(string.rep("x", 90))
+  -- Rows hold 45 cells, as in the sent question: widening for the cursor would rewrap them.
+  eq({ f.row + 1, f.col + 49 }, lua("local p = vim.fn.screenpos(0, 1, 45) return { p.row, p.col }"), "row 1 ends at 45")
+  eq({ f.row + 2, f.col + 5 }, lua("local p = vim.fn.screenpos(0, 1, 46) return { p.row, p.col }"), "row 2 starts at 46")
+  eq({ 3, 5 }, lua("return { vim.fn.winline(), vim.fn.wincol() }"), "cursor on a new row, under the text")
+  eq(4, floats()["float-claude"].height, "two rows, the cursor row and padding")
+  keys("y")
+  eq({ 3, 6 }, lua("return { vim.fn.winline(), vim.fn.wincol() }"), "typed text lands where the cursor was")
+  eq(4, floats()["float-claude"].height, "the cursor row now holds text")
 end)
 
 test("the width is a setup option, used by the conversation too", function()
