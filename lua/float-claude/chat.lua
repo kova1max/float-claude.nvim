@@ -20,6 +20,7 @@ local chats, current, uses = {}, nil, 0
 local ns = vim.api.nvim_create_namespace("float-claude")
 local PREFIX = 4 -- "  ❯ " / "    " before every text line: 2 columns of padding, then the prompt
 local SPINNER = { "◐", "◓", "◑", "◒" }
+local DELETED = "the selected code was deleted - select again to edit"
 local SPIN_MS = 130 -- a spinner's frame time
 local DIFF_CONTEXT = 2 -- unchanged lines around each change in the diffs sent
 
@@ -196,7 +197,9 @@ local function message(s, prompt, followup, mentioned)
     return string.format("a block, a column range in %s (each line below is the selected part of one line of it, in order)",
       span(r.first, r.last - r.first + 1))
   end
-  if not s.multi then
+  if s.cur[1].deleted then
+    table.insert(out, "Selected: nothing now - the selected code was deleted.")
+  elseif not s.multi then
     local r = s.cur[1]
     table.insert(out, r.rows and "Selected: " .. block(r) .. ":" or string.format("Selected lines %d-%d:", r.first, r.last))
     vim.list_extend(out, { "<selection>", table.concat(ranges.text(buf, r), "\n"), "</selection>" })
@@ -210,7 +213,7 @@ local function message(s, prompt, followup, mentioned)
   if s.diagnostics then
     local diags = {}
     for _, r in ipairs(s.cur) do
-      for _, d in ipairs(util.diagnostics(buf, r.first, r.last)) do
+      for _, d in ipairs(r.deleted and {} or util.diagnostics(buf, r.first, r.last)) do
         if not vim.tbl_contains(diags, d) then
           table.insert(diags, d)
         end
@@ -447,19 +450,22 @@ function M.open(opts)
   end
 
   -- Read the selected ranges back from their extmarks (not while an edit
-  -- writes them or waits for review). A range whose lines were all deleted is
-  -- dropped, unless it is the last one left.
+  -- writes them or waits for review). A block whose lines were all deleted is
+  -- dropped, but not while a reply is due (its numbering holds until then);
+  -- the last one left stays, and the chat is ask-only while it is deleted.
   local function sync_selection()
     if editing or reviewing or not vim.api.nvim_buf_is_loaded(s.buf) then
       return
     end
+    local ex = s.exchanges[#s.exchanges]
+    local frozen = ex ~= nil and not ex.done
     local cur, kept, gone = {}, {}, {}
     for i, r in ipairs(s.ranges) do
       local spec = ranges.read(s.buf, ns, r)
       if not spec then
         return
       end
-      if spec.deleted and (#kept > 0 or i < #s.ranges) then
+      if spec.deleted and not frozen and (#kept > 0 or i < #s.ranges) then
         table.insert(gone, i)
       else
         table.insert(kept, r)
@@ -474,6 +480,9 @@ function M.open(opts)
       s.notice = which .. (#gone == 1 and " was deleted" or " were deleted")
       table.insert(s.log, string.format("- I deleted the lines of %s; the ranges left are numbered anew below.", which))
       s.ranges = kept
+    end
+    if #cur == 1 and cur[1].deleted then
+      s.notice = DELETED
     end
     s.cur, s.first, s.last = cur, cur[1].first, cur[#cur].last
   end
@@ -1009,11 +1018,18 @@ function M.open(opts)
       return fail("the buffer is not modifiable")
     end
     sync_selection()
+    local gone = vim.iter(ipairs(s.cur)):find(function(_, r)
+      return r.deleted
+    end)
     local a, b = ranges.overlap(s.cur)
-    if a then
+    if gone or a then
       ex.a = "```\n" .. code
-      ex.notice = string.format("ranges %d and %d now share lines, so the edit was not applied - select them again in a new chat", a, b)
-      table.insert(s.log, string.format('- Your EDIT for "%s" was not applied: ranges %d and %d share lines now.', summary(ex.q), a, b))
+      ex.notice = not gone
+          and string.format("ranges %d and %d now share lines, so the edit was not applied - select them again in a new chat", a, b)
+        or #s.cur > 1 and string.format("range %d was deleted, so the edit was not applied", gone)
+        or nil
+      table.insert(s.log, string.format('- Your EDIT for "%s" was not applied: %s.', summary(ex.q),
+        gone and "the code it was for was deleted" or string.format("ranges %d and %d share lines now", a, b)))
       stop_spinner()
       return layout()
     end

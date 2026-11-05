@@ -75,13 +75,12 @@ end
 ---(`lines`: for a block, a mark per row on its whole line).
 function M.track(buf, ns, s, hl)
   local r = { marks = {}, lines = {}, block = s.from ~= nil or s.rows ~= nil, from = s.from }
+  local count = vim.api.nvim_buf_line_count(buf)
   if not r.block then
-    -- Gone (invalid) only once its lines are deleted.
+    local last_line = vim.api.nvim_buf_get_lines(buf, s.last - 1, s.last, false)[1]
     r.marks[1] = vim.api.nvim_buf_set_extmark(buf, ns, s.first - 1, 0, {
-      end_row = s.last,
-      end_col = 0,
-      strict = false,
-      invalidate = true,
+      end_row = s.last < count and s.last or s.last - 1,
+      end_col = s.last < count and 0 or #last_line,
       hl_group = hl,
       priority = 200,
     })
@@ -124,13 +123,11 @@ end
 function M.highlight(buf, ns, r, hl)
   for _, id in ipairs(r.marks) do
     local m = vim.api.nvim_buf_get_extmark_by_id(buf, ns, id, { details = true })
-    if m[1] and not m[3].invalid then
+    if m[1] then
       vim.api.nvim_buf_set_extmark(buf, ns, m[1], m[2], {
         id = id,
         end_row = m[3].end_row,
         end_col = m[3].end_col,
-        strict = false,
-        invalidate = m[3].invalidate,
         right_gravity = m[3].right_gravity,
         end_right_gravity = m[3].end_right_gravity,
         hl_group = hl,
@@ -148,16 +145,16 @@ function M.untrack(buf, ns, r)
 end
 
 ---Where range `r` is now, as a spec { first, last, rows?, from?, deleted? }
----(rows for a block); nil if its marks are gone. Lines all deleted: `deleted`,
----on the line that took their place (for a block, an empty row at its start);
----a block's rows whose lines were deleted are gone.
+---(rows for a block); nil if its marks are gone. Lines all deleted: the line
+---that took their place; for a block, `deleted` and an empty row at its start
+---(a block's rows whose lines were deleted are gone).
 function M.read(buf, ns, r)
   local marks, any = {}, nil
   for k, id in ipairs(r.marks) do
     local m = vim.api.nvim_buf_get_extmark_by_id(buf, ns, id, { details = true })
     local line = r.lines[k] and vim.api.nvim_buf_get_extmark_by_id(buf, ns, r.lines[k], { details = true })
     any = any or (m[1] and m)
-    if m[1] and not (m[3].invalid or line and line[3].invalid) then
+    if m[1] and not (line and line[3].invalid) then
       table.insert(marks, m)
     end
   end
@@ -166,7 +163,7 @@ function M.read(buf, ns, r)
   end
   if #marks == 0 then
     local lnum = math.min(any[1] + 1, vim.api.nvim_buf_line_count(buf))
-    return { first = lnum, last = lnum, rows = r.block and { { lnum, 0, 0 } } or nil, from = r.from, deleted = true }
+    return { first = lnum, last = lnum, rows = { { lnum, 0, 0 } }, from = r.from, deleted = true }
   end
   if not r.block then
     local row, end_row, end_col = marks[1][1], marks[1][3].end_row, marks[1][3].end_col
