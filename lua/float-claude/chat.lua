@@ -308,18 +308,25 @@ end
 -- "test.js · L7–13 · 7 lines", or "test.js · L7" for a single line, "· block"
 -- after it for a block, or "test.js · L2–6, L11 · 2 ranges"; then which chat
 -- it is when there are several ("2/3"), and the chat's model (as chosen, else
--- as the CLI reports it) and effort, if known.
+-- as the CLI reports it) and effort, if known. Deleted ranges are left out;
+-- with none left, "test.js · no selection".
 local function header(s, width)
   local name = vim.api.nvim_buf_get_name(s.buf)
   name = name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":t")
+  local cur = vim.tbl_filter(function(r)
+    return not r.deleted
+  end, s.cur)
   local text, tail
-  if #s.cur > 1 then
-    text = name .. " · " .. table.concat(vim.tbl_map(ranges.label, s.cur), ", ")
-    tail = string.format(" · %d ranges", #s.cur)
+  if #cur == 0 then
+    text, tail = name .. " · no selection", ""
+  elseif #cur > 1 then
+    text = name .. " · " .. table.concat(vim.tbl_map(ranges.label, cur), ", ")
+    tail = string.format(" · %d ranges", #cur)
   else
-    text = s.first == s.last and string.format("%s · L%d", name, s.first)
-      or string.format("%s · L%d–%d · %d lines", name, s.first, s.last, s.last - s.first + 1)
-    tail = s.cur[1].rows and " · block" or ""
+    local r = cur[1]
+    text = r.first == r.last and string.format("%s · L%d", name, r.first)
+      or string.format("%s · L%d–%d · %d lines", name, r.first, r.last, r.last - r.first + 1)
+    tail = r.rows and " · block" or ""
   end
   local _, n = find(s.id)
   local which = #chats > 1 and n and string.format("%d/%d", n, #chats)

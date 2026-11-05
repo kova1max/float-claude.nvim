@@ -667,6 +667,7 @@ test("block edit: after all the block's lines are deleted by hand, the chat is a
   keys("<C-o>")
   keys("2G3dd")
   keys(" ai")
+  eq("  [No Name] · no selection", floats()["float-claude-transcript"].lines[2], "the header")
   eq({ "  the selected code was deleted - select again to", "  edit", "" }, vim.list_slice(turns(), #turns() - 2), "the note")
   keys("again<CR>")
   wait("return answered(2)", "the answer")
@@ -688,6 +689,7 @@ test("lines replaced by a filter (:%!) count as deleted: the chat is ask-only", 
   keys("<C-o>")
   keys(":%!cat<CR>")
   keys(" ai")
+  eq("  [No Name] · no selection", floats()["float-claude-transcript"].lines[2], "the header")
   eq({ "  the selected code was deleted - select again to", "  edit", "" }, vim.list_slice(turns(), #turns() - 2), "the note")
   keys("fix it<CR>")
   wait("return answered(2)", "the reply")
@@ -703,6 +705,7 @@ test("after the selected lines are deleted by hand, the chat is ask-only and an 
   keys("<C-o>")
   keys("2G5dd")
   keys(" ai")
+  eq("  [No Name] · no selection", floats()["float-claude-transcript"].lines[2], "the header")
   eq({ "  the selected code was deleted - select again to", "  edit", "" }, vim.list_slice(turns(), #turns() - 2), "the note")
   keys("fix it<CR>")
   wait("return answered(2)", "the reply")
@@ -735,6 +738,9 @@ test("ranges: a line range deleted while Claude replies keeps the numbering; the
   keys("20GVj ai")
   keys("go<CR>")
   lua([[vim.api.nvim_buf_call(1, function() vim.cmd("2,3d") end)]])
+  lua("require('float-claude.chat').current().layout()") -- as a reply chunk would
+  eq("  [No Name] · L8–9, L18–19 · 2 ranges", floats()["float-claude-transcript"].lines[2],
+    "the header: only the ranges still tracked")
   wait("return answered(1)", "the reply")
   eq({ "-- 10", "-- 11" }, lua("return vim.api.nvim_buf_get_lines(1, 7, 9, false)"), "range 2 untouched")
   eq({ "-- 20", "-- 21" }, lua("return vim.api.nvim_buf_get_lines(1, 17, 19, false)"), "range 3 untouched")
