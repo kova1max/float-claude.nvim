@@ -1741,6 +1741,31 @@ test("close_after_edit closes once the edit is applied; close_on_leave closes wh
   wait("return #vim.api.nvim_list_wins() == 1", "the popup to close")
 end)
 
+test("answer: a name on the last line, already resolved, is underlined once the reply ends", function()
+  setup({ CODE_ANSWER, "ANSWER\nuse `nums` here." }, 80)
+  fake_lsp({ nums = { 0, 11 } }, {})
+  ask()
+  keys("explain<CR>")
+  wait("return answered(1)", "the first answer")
+  local function linked(row)
+    return vim.iter(transcript_hls()):any(function(h)
+      return vim.deep_equal(h, { row, "nums", "FloatClaudeLink" })
+    end)
+  end
+  for _ = 1, 50 do
+    if linked(4) then
+      break
+    end
+    lua("vim.wait(20)")
+  end
+  assert(linked(4), "nums resolved in the first answer")
+  keys("more<CR>")
+  wait("return answered(2)", "the second answer")
+  local row = vim.fn.index(turns(), "    use nums here.") + 3
+  assert(row > 2, "the last line: " .. vim.inspect(turns()))
+  assert(linked(row), "nums underlined on the last line: " .. vim.inspect(transcript_hls()))
+end)
+
 test("close_on_leave: focusing the hover window (K twice) keeps the popup", function()
   setup({ CODE_ANSWER }, 0, { close_on_leave = true })
   fake_lsp({ nums = { 0, 11 } }, {})

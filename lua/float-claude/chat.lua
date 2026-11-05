@@ -728,14 +728,14 @@ function M.open(opts)
     local kept = not s.follow and vim.fn.line("w0", s.twin)
     local tlines, hls = transcript(width)
     -- Only the rows from the first changed one on are written again, those of
-    -- a reply still streaming always (its code's highlights can change).
+    -- a reply still streaming, or just finished, always (its highlights can change).
     local from, drawn, ex = 0, s.drawn or {}, s.exchanges[#s.exchanges]
     while from < #tlines and tlines[from + 1] == drawn[from + 1] do
       from = from + 1
     end
-    if ex and not ex.done then
-      from = math.min(from, ex.line - 1)
-    end
+    from = math.min(from, s.streamed_from or from)
+    s.streamed_from = ex and not ex.done and ex.line - 1 or nil
+    from = math.min(from, s.streamed_from or from)
     s.drawn = tlines
     vim.bo[s.tbuf].modifiable = true
     vim.api.nvim_buf_set_lines(s.tbuf, from, -1, false, vim.list_slice(tlines, from + 1))
