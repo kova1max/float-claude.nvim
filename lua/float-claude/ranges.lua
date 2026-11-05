@@ -159,6 +159,13 @@ function M.untrack(buf, ns, r)
   end
 end
 
+-- A mark of whole lines (from lines_mark or a block row's line) is gone once
+-- invalid, or collapsed: Neovim 0.10.0 does not invalidate one spanning
+-- several deleted lines.
+local function gone(m)
+  return m[3].invalid or (m[1] == m[3].end_row and m[2] == m[3].end_col)
+end
+
 ---Where range `r` is now, as a spec { first, last, rows?, from?, deleted? }
 ---(rows for a block); nil if its marks are gone. Lines all deleted (or
 ---replaced): `deleted`, on the line that took their place (for a block, an
@@ -169,7 +176,7 @@ function M.read(buf, ns, r)
     local m = vim.api.nvim_buf_get_extmark_by_id(buf, ns, id, { details = true })
     local line = r.lines[k] and vim.api.nvim_buf_get_extmark_by_id(buf, ns, r.lines[k], { details = true })
     any = any or (m[1] and m)
-    if m[1] and not (m[3].invalid or line and line[3].invalid) then
+    if m[1] and not (m[3].invalid or not r.block and gone(m) or line and gone(line)) then
       table.insert(marks, m)
     end
   end
