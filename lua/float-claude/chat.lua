@@ -6,6 +6,7 @@ local edit = require("float-claude.edit")
 local history = require("float-claude.history")
 local lsp = require("float-claude.lsp")
 local mentions = require("float-claude.mentions")
+local ranges = require("float-claude.ranges")
 local theme = require("float-claude.theme")
 local util = require("float-claude.util")
 
@@ -19,6 +20,7 @@ local chats, current, uses = {}, nil, 0
 local ns = vim.api.nvim_create_namespace("float-claude")
 local PREFIX = 4 -- "  ❯ " / "    " before every text line: 2 columns of padding, then the prompt
 local SPINNER = { "◐", "◓", "◑", "◒" }
+local DELETED = "the selected code was deleted - select again to edit"
 local SPIN_MS = 130 -- a spinner's frame time
 local DIFF_CONTEXT = 2 -- unchanged lines around each change in the diffs sent
 
@@ -56,9 +58,25 @@ local function width_of(s)
   return vim.fn.strdisplaywidth(s)
 end
 
--- The lines sent around the selection.
-local function window(s)
-  return math.max(1, s.first - s.context_lines), math.min(vim.api.nvim_buf_line_count(s.buf), s.last + s.context_lines)
+-- The lines sent around the selected ranges, as { from, to } spans, merged
+-- where they meet.
+local function windows(s)
+  local out, count = {}, vim.api.nvim_buf_line_count(s.buf)
+  for _, r in ipairs(s.cur) do
+    local from, to = math.max(1, r.first - s.context_lines), math.min(count, r.last + s.context_lines)
+    local prev = out[#out]
+    if prev and from <= prev[2] + 1 then
+      prev[2] = math.max(prev[2], to)
+    else
+      table.insert(out, { from, to })
+    end
+  end
+  return out
+end
+
+-- "line 4" or "lines 2-6": `count` lines from line `n`.
+local function span(n, count)
+  return count == 1 and "line " .. n or string.format("lines %d-%d", n, n + count - 1)
 end
 
 -- The user's own instructions: the `prompt` option, then the project's file.
@@ -83,9 +101,9 @@ local function instructions(opts, buf)
 end
 
 -- A unified diff from `old` to `new` (lists of lines) with file line numbers,
--- "" if they are the same. Given `from`/`to`, only the hunks touching those
--- lines of `new` are kept; the second result counts the others.
-local function unified(old, new, from, to)
+-- "" if they are the same. Given `wins` ({ from, to } spans), only the hunks
+-- touching those lines of `new` are kept; the second result counts the others.
+local function unified(old, new, wins)
   local text = util.diff(table.concat(old, "\n") .. "\n", table.concat(new, "\n") .. "\n", { ctxlen = DIFF_CONTEXT })
   local hunks = {}
   for line in text:gmatch("[^\n]*\n") do
@@ -99,7 +117,9 @@ local function unified(old, new, from, to)
   for _, hunk in ipairs(hunks) do
     local start, count = hunk[1]:match("^@@ %-[%d,]+ %+(%d+),?(%d*) @@")
     local stop = tonumber(start) + math.max(tonumber(count) or 1, 1) - 1
-    if not from or (stop >= from and tonumber(start) <= to) then
+    if not wins or vim.iter(wins):any(function(w)
+      return stop >= w[1] and tonumber(start) <= w[2]
+    end) then
       table.insert(kept, table.concat(hunk))
     else
       skipped = skipped + 1
@@ -137,7 +157,6 @@ local function message(s, prompt, followup, mentioned)
   local name = vim.api.nvim_buf_get_name(buf)
   name = name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":~:.")
   local ft = vim.bo[buf].filetype
-  local from, to = window(s)
   local function lines(a, b)
     return table.concat(vim.api.nvim_buf_get_lines(buf, a - 1, b, false), "\n")
   end
@@ -148,32 +167,58 @@ local function message(s, prompt, followup, mentioned)
   end
   if #s.edits > 0 then
     table.insert(out, "Your edits applied in this conversation so far (each diff was sent once, when it was applied):")
-    local function span(n, count)
-      return count == 1 and "line " .. n or string.format("lines %d-%d", n, n + count - 1)
-    end
     for i, e in ipairs(s.edits) do
-      table.insert(out, string.format('#%d "%s": %s became %s', i, e.request, span(e.first, e.old), span(e.first, e.new)))
+      local what = e.ranges and table.concat(vim.tbl_map(function(r)
+        return string.format("range %d (%s) became %s", r.n, span(r.was, r.old), span(r.first, r.new))
+      end, e.ranges), ", ") or string.format("%s became %s", span(e.first, e.old), span(e.first, e.new))
+      table.insert(out, string.format('#%d "%s": %s', i, e.request, what))
     end
   end
   if followup then
     table.insert(out, "The current version of the code (it replaces every earlier version):")
   end
   table.insert(out, string.format("File: %s (filetype: %s)", name, ft == "" and "none" or ft))
-  local context = { from, to, lines(from, to) }
+  local context = vim.tbl_map(function(w)
+    return { w[1], w[2], lines(w[1], w[2]) }
+  end, windows(s))
   if followup and vim.deep_equal(context, s.sent_context) then
-    table.insert(out, string.format("Lines %d-%d of the file, for context: unchanged since my last message.", from, to))
+    table.insert(out, string.format("Lines %s of the file, for context: unchanged since my last message.",
+      table.concat(vim.tbl_map(function(c)
+        return c[1] .. "-" .. c[2]
+      end, context), ", ")))
   else
-    vim.list_extend(out, { string.format("Lines %d-%d of the file, for context:", from, to), "<context>", context[3], "</context>" })
+    for _, c in ipairs(context) do
+      vim.list_extend(out, { string.format("Lines %d-%d of the file, for context:", c[1], c[2]), "<context>", c[3], "</context>" })
+    end
   end
   s.sent_context = context
-  vim.list_extend(out, {
-    string.format("Selected lines %d-%d:", s.first, s.last),
-    "<selection>",
-    lines(s.first, s.last),
-    "</selection>",
-  })
+  -- A block's text is the selected part of each of its lines.
+  local function block(r)
+    return string.format("a block, a column range in %s (each line below is the selected part of one line of it, in order)",
+      span(r.first, r.last - r.first + 1))
+  end
+  if s.cur[1].deleted then
+    table.insert(out, "Selected: nothing now - the selected code is no longer tracked.")
+  elseif not s.multi then
+    local r = s.cur[1]
+    table.insert(out, r.rows and "Selected: " .. block(r) .. ":" or string.format("Selected lines %d-%d:", r.first, r.last))
+    vim.list_extend(out, { "<selection>", table.concat(ranges.text(buf, r), "\n"), "</selection>" })
+  else
+    table.insert(out, string.format("Selected ranges (%d), numbered in file order:", #s.cur))
+    for i, r in ipairs(s.cur) do
+      table.insert(out, string.format("Range %d: %s:", i, r.rows and block(r) or span(r.first, r.last - r.first + 1)))
+      vim.list_extend(out, { "<range " .. i .. ">", table.concat(ranges.text(buf, r), "\n"), "</range " .. i .. ">" })
+    end
+  end
   if s.diagnostics then
-    local diags = util.diagnostics(buf, s.first, s.last)
+    local diags = {}
+    for _, r in ipairs(s.cur) do
+      for _, d in ipairs(r.deleted and {} or util.diagnostics(buf, r.first, r.last)) do
+        if not vim.tbl_contains(diags, d) then
+          table.insert(diags, d)
+        end
+      end
+    end
     if #diags > 0 then
       table.insert(out, "Diagnostics in the selected lines:")
       vim.list_extend(out, diags)
@@ -260,15 +305,29 @@ local function transcript_keymaps(s, opts, close, on_link)
   map(s.tbuf, "n", opts.line_down_key, "<C-e>")
 end
 
--- "test.js · L7–13 · 7 lines", or "test.js · L7" for a single line, then
--- which chat it is when there are several ("2/3"), and the chat's model (as
--- chosen, else as the CLI reports it) and effort, if known.
+-- "test.js · L7–13 · 7 lines", or "test.js · L7" for a single line, "· block"
+-- after it for a block, or "test.js · L2–6, L11 · 2 ranges"; then which chat
+-- it is when there are several ("2/3"), and the chat's model (as chosen, else
+-- as the CLI reports it) and effort, if known. Deleted ranges are left out;
+-- with none left, "test.js · no selection".
 local function header(s, width)
   local name = vim.api.nvim_buf_get_name(s.buf)
   name = name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":t")
-  local text = s.first == s.last and string.format("%s · L%d", name, s.first)
-    or string.format("%s · L%d–%d · %d lines", name, s.first, s.last, s.last - s.first + 1)
-  local tail = ""
+  local cur = vim.tbl_filter(function(r)
+    return not r.deleted
+  end, s.cur)
+  local text, tail
+  if #cur == 0 then
+    text, tail = name .. " · no selection", ""
+  elseif #cur > 1 then
+    text = name .. " · " .. table.concat(vim.tbl_map(ranges.label, cur), ", ")
+    tail = string.format(" · %d ranges", #cur)
+  else
+    local r = cur[1]
+    text = r.first == r.last and string.format("%s · L%d", name, r.first)
+      or string.format("%s · L%d–%d · %d lines", name, r.first, r.last, r.last - r.first + 1)
+    tail = r.rows and " · block" or ""
+  end
   local _, n = find(s.id)
   local which = #chats > 1 and n and string.format("%d/%d", n, #chats)
   for _, part in ipairs({ which or false, s.model or s.reported or false, s.effort or false }) do
@@ -282,10 +341,12 @@ local function header(s, width)
   return text .. tail
 end
 
----Open the popup for lines `first`..`last` of the current window's buffer.
----@param opts table the setup() options (see init.lua), plus `first`, `last` and `selected`
----  `selected` is true when the lines come from a Visual selection; they stay
----  highlighted while the popup is open. With `review_edits`, an edit shows as
+---Open the popup for ranges of the current window's buffer.
+---@param opts table the setup() options (see init.lua), plus `ranges` and `selected`
+---  `ranges` are specs (see ranges.lua) in file order, apart from each other:
+---  each a range of lines or a block. `selected` is true when they come from
+---  a selection; they stay highlighted while the popup is open. With
+---  several, Claude edits each by its number. With `review_edits`, an edit shows as
 ---  a diff until `accept_key` or `discard_key` is pressed in the popup.
 ---  `hide_key` hides the popup and `unfocus_key` leaves it on screen; either
 ---  way the conversation goes on, and M.focus() comes back to it. A chat
@@ -309,8 +370,12 @@ function M.open(opts)
     win = vim.api.nvim_get_current_win(),
     buf = vim.api.nvim_get_current_buf(),
     cursor = vim.api.nvim_win_get_cursor(0),
-    first = opts.first,
-    last = opts.last,
+    -- The ranges: `ranges` their extmarks (see ranges.lua), `cur` where they
+    -- are now (specs), and `first`/`last` the lines from the first one's
+    -- first to the last one's last.
+    first = opts.ranges[1].first,
+    last = opts.ranges[#opts.ranges].last,
+    multi = #opts.ranges > 1,
     context_lines = opts.context_lines,
     diagnostics = opts.diagnostics,
     model = saved.model or opts.model or nil, -- as chosen; `reported` is what the CLI says it runs
@@ -327,7 +392,7 @@ function M.open(opts)
     -- since its last reply, `edits` its applied edits.
     known = nil,
     log = {},
-    edits = saved.edits or {}, -- { request, first, old, new }
+    edits = saved.edits or {}, -- { request, first, old, new }, or with several ranges { request, ranges }
     unread = false, -- a reply ended while hidden
   }
   local ft = vim.bo[s.buf].filetype
@@ -344,32 +409,22 @@ function M.open(opts)
   local cursor_pos = vim.fn.screenpos(s.win, s.cursor[1], s.cursor[2] + 1)
   local cursor_row, cursor_col = cursor_pos.row - 1, cursor_pos.col - 1
 
-  -- The selected lines are an extmark, so they follow changes made since: typing
-  -- in them, lines added or removed above them. Highlighted if from Visual
-  -- mode, while the chat is not hidden.
-  local function set_selection()
-    local count = vim.api.nvim_buf_line_count(s.buf)
-    local last_line = vim.api.nvim_buf_get_lines(s.buf, s.last - 1, s.last, false)[1]
-    s.sel_mark = vim.api.nvim_buf_set_extmark(s.buf, ns, s.first - 1, 0, {
-      end_row = s.last < count and s.last or s.last - 1,
-      end_col = s.last < count and 0 or #last_line,
-      hl_group = opts.selected and not s.hidden and "FloatClaudeSelection" or nil,
-      priority = 200,
-    })
+  -- The selected ranges are extmarks, so they follow changes made since: typing
+  -- in them, lines added or removed above them. Highlighted if selected, while
+  -- the chat is not hidden.
+  local function selection_hl()
+    return opts.selected and not s.hidden and "FloatClaudeSelection" or nil
   end
-  set_selection()
+  s.ranges = vim.tbl_map(function(spec)
+    return ranges.track(s.buf, ns, spec, selection_hl())
+  end, opts.ranges)
 
-  -- Highlight the selected lines, or not, as set_selection() does.
+  -- Highlight the selected ranges, or not, as when tracked.
   local function highlight_selection()
-    local m = vim.api.nvim_buf_is_loaded(s.buf) and vim.api.nvim_buf_get_extmark_by_id(s.buf, ns, s.sel_mark, { details = true })
-    if m and m[1] then
-      vim.api.nvim_buf_set_extmark(s.buf, ns, m[1], m[2], {
-        id = s.sel_mark,
-        end_row = m[3].end_row,
-        end_col = m[3].end_col,
-        hl_group = opts.selected and not s.hidden and "FloatClaudeSelection" or nil,
-        priority = 200,
-      })
+    if vim.api.nvim_buf_is_loaded(s.buf) then
+      for _, r in ipairs(s.ranges) do
+        ranges.highlight(s.buf, ns, r, selection_hl())
+      end
     end
   end
 
@@ -389,6 +444,7 @@ function M.open(opts)
       file = file,
       first = s.first,
       last = s.last,
+      ranges = s.cur,
       selected = opts.selected,
       session = s.session,
       model = s.model,
@@ -400,23 +456,52 @@ function M.open(opts)
     }, opts.history)
   end
 
-  -- Read the selected lines back from the extmark (all of them deleted: the
-  -- line that took their place).
+  -- Read the selected ranges back from their extmarks (not while an edit
+  -- writes them or waits for review). A range whose lines were all deleted is
+  -- dropped, but not while a reply is due (its numbering holds until then);
+  -- the last one left stays, and the chat is ask-only while it is deleted.
   local function sync_selection()
-    local m = vim.api.nvim_buf_is_loaded(s.buf) and vim.api.nvim_buf_get_extmark_by_id(s.buf, ns, s.sel_mark, { details = true })
-    if m and m[1] then
-      local row, end_row, end_col = m[1], m[3].end_row, m[3].end_col
-      s.first = row + 1
-      s.last = math.max(end_col == 0 and end_row > row and end_row or end_row + 1, s.first)
+    if editing or reviewing or not vim.api.nvim_buf_is_loaded(s.buf) then
+      return
     end
+    local ex = s.exchanges[#s.exchanges]
+    local frozen = ex ~= nil and not ex.done
+    local cur, kept, gone = {}, {}, {}
+    for i, r in ipairs(s.ranges) do
+      local spec = ranges.read(s.buf, ns, r)
+      if not spec then
+        return
+      end
+      if spec.deleted and not frozen and (#kept > 0 or i < #s.ranges) then
+        table.insert(gone, i)
+      else
+        table.insert(kept, r)
+        table.insert(cur, spec)
+      end
+    end
+    if #gone > 0 then
+      for _, i in ipairs(gone) do
+        ranges.untrack(s.buf, ns, s.ranges[i])
+      end
+      local which = (#gone == 1 and "range " or "ranges ") .. table.concat(gone, ", ")
+      s.notice = which .. (#gone == 1 and " was deleted" or " were deleted")
+      table.insert(s.log, string.format("- %s %s no longer tracked; the ranges left are numbered anew below.",
+        which:gsub("^r", "R"), #gone == 1 and "is" or "are"))
+      s.ranges = kept
+    end
+    if #cur == 1 and cur[1].deleted then
+      s.notice = DELETED
+    end
+    s.cur, s.first, s.last = cur, cur[1].first, cur[#cur].last
   end
+  sync_selection()
 
   -- The user's own changes since s.known (near the selection) go into the log
   -- as a diff; Claude knows the code as it is now then.
   local function note_hand_changes()
     local now = vim.api.nvim_buf_get_lines(s.buf, 0, -1, false)
     if s.known then
-      local d, skipped = unified(s.known, now, window(s))
+      local d, skipped = unified(s.known, now, windows(s))
       if d ~= "" then
         table.insert(s.log, "- I changed the code myself:\n<diff>\n" .. d .. "</diff>")
       end
@@ -563,6 +648,12 @@ function M.open(opts)
         add("")
       end
     end
+    if s.notice then
+      for _, l in ipairs(answer.wrap(s.notice, width - 3)) do
+        add("  " .. l, "FloatClaudeHistory")
+      end
+      add("")
+    end
     if streaming() then
       add("")
     end
@@ -594,9 +685,7 @@ function M.open(opts)
     if closed then
       return
     end
-    if not editing then -- an edit sets the selection once it is over
-      sync_selection()
-    end
+    sync_selection()
     local width = math.max(math.min(opts.width, vim.o.columns), 1)
 
     local kept = not s.follow and vim.fn.line("w0", s.twin)
@@ -788,7 +877,9 @@ function M.open(opts)
 
   local function clear_selection()
     if vim.api.nvim_buf_is_valid(s.buf) then
-      pcall(vim.api.nvim_buf_del_extmark, s.buf, ns, s.sel_mark)
+      for _, r in ipairs(s.ranges) do
+        ranges.untrack(s.buf, ns, r)
+      end
     end
   end
 
@@ -853,7 +944,13 @@ function M.open(opts)
   local function end_edit(ex, result)
     local handle = editing
     editing, reviewing = nil, nil
-    local note = result and result.old and string.format("refactored %d → %d lines · u to undo", result.old, result.new)
+    -- With several ranges: the ones it changed, "range 2" or "ranges 1, 3".
+    local changed = result and result.ranges and (#result.ranges == 1 and "range " or "ranges ")
+      .. table.concat(vim.tbl_map(function(r)
+        return r.n
+      end, result.ranges), ", ")
+    local note = result and result.old and (s.multi and "refactored " .. changed .. " · u to undo"
+      or string.format("refactored %d → %d lines · u to undo", result.old, result.new))
     if closed then -- cancelled by close()
       return
     end
@@ -862,8 +959,8 @@ function M.open(opts)
     end
     if result.pending then
       reviewing = handle
-      ex.note = string.format("review: %d → %d lines\n%s accept · %s discard", result.old, result.new,
-        opts.accept_key, opts.discard_key)
+      ex.note = string.format("review: %s\n%s accept · %s discard",
+        s.multi and changed or string.format("%d → %d lines", result.old, result.new), opts.accept_key, opts.discard_key)
       stop_spinner()
       finished()
       return layout()
@@ -873,17 +970,23 @@ function M.open(opts)
       note = "edit discarded"
     else
       local now = vim.api.nvim_buf_get_lines(s.buf, 0, -1, false)
-      table.insert(s.edits, { request = summary(ex.q), first = s.first, old = result.old, new = result.new })
+      table.insert(s.edits, s.multi and { request = summary(ex.q), ranges = result.ranges }
+        or { request = summary(ex.q), first = s.first, old = result.old, new = result.new })
       table.insert(s.log, string.format('- Your EDIT for "%s" (edit #%d) was %s:\n<diff>\n%s</diff>', summary(ex.q), #s.edits,
         opts.review_edits and "accepted and applied" or "applied as is", unified(s.known, now)))
       s.known = now
-      -- Follow-ups work on the new lines.
-      s.last = s.first + result.new - 1
+      -- Follow-ups work on the new lines: a range of lines it changed is the
+      -- lines that took its place (a block's marks follow its new parts).
+      for _, r in ipairs(result.ranges) do
+        local range = s.ranges[r.n]
+        if not range.block then
+          ranges.move(s.buf, ns, range, r.first, r.first + r.new - 1, selection_hl())
+        end
+      end
+      sync_selection()
       if s.from == s.win and vim.api.nvim_win_is_valid(s.win) and vim.api.nvim_win_get_buf(s.win) == s.buf then
         s.from_buf, s.cursor = s.buf, vim.api.nvim_win_get_cursor(s.win) -- on the new lines
       end
-      clear_selection()
-      set_selection()
     end
     ex.note = note
     ex.done = true
@@ -921,14 +1024,41 @@ function M.open(opts)
     if not vim.bo[s.buf].modifiable then
       return fail("the buffer is not modifiable")
     end
-    ex.edit = true
     sync_selection()
+    local gone = vim.iter(ipairs(s.cur)):find(function(_, r)
+      return r.deleted
+    end)
+    local a, b = ranges.overlap(s.cur)
+    if gone or a then
+      ex.a = "```\n" .. code
+      ex.notice = not gone
+          and string.format("ranges %d and %d now share lines, so the edit was not applied - select them again in a new chat", a, b)
+        or #s.cur > 1 and string.format("range %d was deleted, so the edit was not applied", gone)
+        or nil
+      table.insert(s.log, string.format('- Your EDIT for "%s" was not applied: %s.', summary(ex.q),
+        gone and "the code it was for was deleted" or string.format("ranges %d and %d share lines now", a, b)))
+      stop_spinner()
+      return layout()
+    end
+    ex.edit = true
     note_hand_changes() -- made while Claude was replying; its edit's diff leaves them out
     editing = edit.start({
       buf = s.buf,
       win = s.win,
-      first = s.first,
-      last = s.last,
+      targets = vim.tbl_map(function(r)
+        return {
+          first = r.first,
+          last = r.last,
+          -- A part at the end of a line that ends left of the block: text put
+          -- there is padded out to the block's column.
+          rows = r.rows and vim.tbl_map(function(row)
+            local line = vim.fn.getbufline(s.buf, row[1])[1]
+            local pad = row[2] == #line and r.from and r.from - 1 - vim.fn.strdisplaywidth(line) or 0
+            return { row[1], row[2], row[3], pad = math.max(pad, 0) }
+          end, r.rows),
+        }
+      end, s.cur),
+      numbered = s.multi,
       review = opts.review_edits,
       on_end = function(result)
         end_edit(ex, result)
@@ -1005,6 +1135,12 @@ function M.open(opts)
       return
     end
     sync_selection()
+    local a, b = ranges.overlap(s.cur)
+    if a then
+      s.notice = string.format("ranges %d and %d now share lines, so nothing was sent - select them again in a new chat", a, b)
+      return layout()
+    end
+    s.notice = nil
     note_hand_changes()
     local mentioned = opts.mentions and mentions.expand(text, s.buf, opts.mentions) or {}
     local msg = message(s, text, #s.exchanges > 0, mentioned)
@@ -1282,8 +1418,8 @@ function M.open(opts)
       sync_selection()
       local name = vim.api.nvim_buf_get_name(s.buf)
       local ex = s.exchanges[#s.exchanges]
-      return string.format("%s · L%s%s", name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":t"),
-        s.first == s.last and s.first or s.first .. "–" .. s.last, ex and " · " .. summary(ex.q) or "")
+      return string.format("%s · %s%s", name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":t"),
+        table.concat(vim.tbl_map(ranges.label, s.cur), ", "), ex and " · " .. summary(ex.q) or "")
     end,
     -- The buffer and lines the conversation is about.
     source = function()

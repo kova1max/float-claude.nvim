@@ -39,8 +39,9 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 | Key | Where | Action |
 |---|---|---|
-| `<leader>ai` | Visual | Ask about the selected lines (any Visual mode; whole lines are used) |
+| `<leader>ai` | Visual | Ask about the selected lines (`v` and `V`: whole lines; `<C-v>`: just the block's columns, see [Blocks](#blocks)) |
 | `<leader>ai` | Normal | Back to the open popup (shown again if hidden); with none open, ask about the current line (not highlighted) |
+| `<leader>am` / `<leader>ax` | Visual, Normal | Add the selection (Normal: the current line) to the ranges to ask about together / clear them (see [Several ranges](#several-ranges)) |
 | `<CR>` | Popup | Send the prompt |
 | `<S-CR>` or `<C-j>` | Popup | New line in the prompt (use `<C-j>` if your terminal does not send Shift-Enter) |
 | `<C-u>` / `<C-d>`, mouse wheel, `<Up>` / `<Down>` | Popup | Scroll the conversation (in a multi-line prompt the arrows first move between its lines) |
@@ -71,6 +72,32 @@ The popup does not have to be in the way, and does not have to go away:
 - `<C-o>` (or leaving it any other way: another window, a split, another file) puts you back in the code with the popup still on screen, on top of whatever is shown there. It stays where it opened (top-right, or at the cursor it opened at) and answers keep streaming into it.
 
 `<leader>ai` in Normal mode brings you back into it, showing it first if hidden, with the same conversation and scroll position. A new Visual selection with `<leader>ai` starts another chat, and the open one waits hidden (see [Several chats](#several-chats)). `q` in the popup (Normal mode; `<Esc>` first if you are typing) or `:q` in it closes it and ends the conversation. Prefer the popup to go away on its own? See `close_after_edit` and `close_on_leave` below. Files never open inside the popup; `:e` there is refused.
+
+### Blocks
+
+Select a block with `<C-v>` and the chat is about just those columns: Claude gets the selected part of each line (with the whole lines around them as context), and an edit replaces exactly those columns on each line, leaving the text left and right of the block alone. It works on ragged lines too: a line that ends inside the block has its part up to its end, a block extended with `$` goes to each line's end, and new text for a line that ends before the block is padded with spaces out to the block's column. A character only partly in the block (a tab, a wide character) counts as in it.
+
+```
+  config.lua · L2–4 · 3 lines · block
+  ❯ uppercase the string values
+    refactored 3 → 3 lines · u to undo
+```
+
+Claude replies one line per line of the block. A line it leaves out has its part emptied, and lines past the block's are added below it. The edit streams in line by line and is one `u`, as for lines; follow-ups send each line's part as it is then.
+
+### Several ranges
+
+To ask about separate parts of a file at once, collect them first: select one and press `<leader>am` (`:FloatClaudeAdd`, or `:'<,'>FloatClaudeAdd`), repeat for the others, then select the last one and press `<leader>ai` (or press `<leader>ai` in Normal mode to ask about the ones collected). Each range can be lines or a block. The collected ranges are highlighted and numbered in file order (`range 1`, `range 2`, ...) at the end of their first line; `<leader>ax` (`:FloatClaudeClear`) clears them. They are all in one file, and must not share lines: adding one in another file, or overlapping one already collected, is refused with a message. A one-key action (see [Actions](#actions)) works on the collected ranges too, plus the selection.
+
+```
+  demo.js · L7–9, L11–13 · 2 ranges
+  ❯ rename the parameters to x and y in both
+    refactored ranges 1, 2 · u to undo
+```
+
+Claude gets each range by its number, and answers about them, or edits them in one reply: each range it changes, by its number, is replaced in place (the others stay as they are), and ranges below one that grew or shrank stay on their lines. All of the reply's changes are one `u`. With `review_edits`, each changed range shows its own diff, and one accept writes them all (one discard drops them all). Every follow-up sends every range as it is then.
+
+If you delete all the lines of a range (or a block) while its chat is open, the chat drops that range with a note such as `range 1 was deleted`, and the ranges left are numbered anew in the next message (the header lists only those). Lines replaced as a whole count as deleted too: a filter such as `:%!fmt`, or a formatter that rewrites the whole buffer, turns the selection into deleted code. When the last range left is deleted, the chat stays open but is ask-only: it says `the selected code was deleted - select again to edit`, the header shows `demo.js · no selection`, it sends no selection, and does not apply an edit (select the code again in a new chat). While Claude is replying, the ranges keep their numbers; an edit for ranges of which one was deleted, or that now share lines, is not applied, and the reply stays in the chat as an answer with a note. A block's line that is replaced as a whole (not just edited) also leaves the block. `u` after an applied edit puts the ranges back on the old lines. Redo (`<C-r>`) after that replaces those lines again, so the ranges it changed count as deleted then, as above: select the code again.
 
 ### Actions
 
@@ -107,7 +134,7 @@ opts = {
 
 An action is `{ key, prompt }` (`key = false`: no mapping, still in `:FloatClaude`), plus `prose = true` to offer it for prose and comments instead of code, or `filetypes = { ... }` to offer it only in those filetypes: its key is then mapped only in buffers of those filetypes (and in the popup of a chat about one), and `:FloatClaude` lists it only there.
 
-`:FloatClaude` lists the actions offered for the current buffer with their keys, plus opening the popup (or going back to the open one), hiding it, switching its theme, reopening a saved chat, with a chat open switching its model and effort, and with several open going to another, through `vim.ui.select` (so a picker plugin that replaces it, like telescope or snacks, shows it). From Visual mode (`:'<,'>FloatClaude`) the pick works on the selection; otherwise it does what its key does in Normal mode.
+`:FloatClaude` lists the actions offered for the current buffer with their keys, plus opening the popup (or going back to the open one), adding a range to ask about together (and clearing the collected ones), hiding it, switching its theme, reopening a saved chat, with a chat open switching its model and effort, and with several open going to another, through `vim.ui.select` (so a picker plugin that replaces it, like telescope or snacks, shows it). From Visual mode (`:'<,'>FloatClaude`) the pick works on the selection; otherwise it does what its key does in Normal mode.
 
 ### Mentions
 
@@ -162,7 +189,7 @@ Each chat about a file is saved once a reply ends: its file and lines, the conve
 lua/demo.lua · L2–6 · 3h ago · what's the time complexity?
 ```
 
-Picking one opens its file and reopens the chat on the same lines (kept within the file, which may have changed since), with the conversation as it was, also after restarting Neovim. The `claude` process resumes the chat's session (`claude --resume`), so Claude remembers it, and the next message sends the code as it is now. If the session cannot be resumed (e.g. you deleted it), the popup says so and the next message sends the conversation so far as text instead, so Claude still knows what was said. A chat that is still open is just shown.
+Picking one opens its file and reopens the chat on the same lines, block or ranges (kept within the file, which may have changed since), with the conversation as it was, also after restarting Neovim. The `claude` process resumes the chat's session (`claude --resume`), so Claude remembers it, and the next message sends the code as it is now. If the session cannot be resumed (e.g. you deleted it), the popup says so and the next message sends the conversation so far as text instead, so Claude still knows what was said. A chat that is still open is just shown.
 
 Chats are saved under `stdpath("state")/float-claude` (e.g. `~/.local/state/nvim/float-claude`), one JSON file each; the latest 100 are kept, none older than 30 days (`history = { max = 100, days = 30 }`, either can be `false`). For the sessions to resume, the `claude` CLI saves them too, as it does for any session, so they also show in `claude --resume` in that directory. `history = false` saves nothing, and the CLI then saves no sessions either.
 
@@ -195,7 +222,7 @@ The popup stays open either way, so you can keep asking. Hiding or leaving the p
 
 ### What Claude sees
 
-Claude gets the file name and filetype, the selected lines, up to 40 lines around them (`context_lines`), and the diagnostics in the selected lines (errors, warnings, ... from LSP or a linter, with their line, severity, message and source; `diagnostics = false` leaves them out), plus whatever the message mentions with `@`. Each follow-up sends the diagnostics as they are then, so after an edit Claude sees whether the errors went away. Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends (and, for a [reopened](#history) chat, its own saved session).
+Claude gets the file name and filetype, the selected lines (for a block, each line's selected part; with several ranges, each one by its number), up to 40 lines around them (`context_lines`), and the diagnostics in the selected lines (errors, warnings, ... from LSP or a linter, with their line, severity, message and source; `diagnostics = false` leaves them out), plus whatever the message mentions with `@`. Each follow-up sends the diagnostics as they are then, so after an edit Claude sees whether the errors went away. Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends (and, for a [reopened](#history) chat, its own saved session).
 
 Claude also remembers what it changed. Each follow-up starts with a short record of what happened since its last reply, as diffs rather than copies of the code:
 
@@ -300,6 +327,8 @@ Every option, with its default (`opts` for lazy.nvim, or `require("float-claude"
   prev_chat_key = "<leader>ap", -- show the previous one
   chats_key = "<leader>al", -- pick an open chat from a list
   history_key = "<leader>aH", -- pick a saved chat to reopen
+  add_range_key = "<leader>am", -- Visual and Normal mode: add the selection (or the current line) to the ranges to ask about together
+  clear_ranges_key = "<leader>ax", -- Normal mode: clear them
   -- Keys in the popup:
   submit_key = "<CR>", -- send the prompt (Insert and Normal mode)
   newline_keys = { "<S-CR>", "<C-j>" }, -- Insert mode: a new line in the prompt

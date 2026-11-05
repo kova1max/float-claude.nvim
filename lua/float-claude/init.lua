@@ -92,6 +92,10 @@ local config = {
   prev_chat_key = "<leader>ap", -- show the previous one
   chats_key = "<leader>al", -- pick an open chat from a list
   history_key = "<leader>aH", -- pick a saved chat to reopen
+  -- Normal and Visual mode: add the selection (Normal: the current line) to
+  -- the ranges to ask about together with the next `keymap` or action.
+  add_range_key = "<leader>am",
+  clear_ranges_key = "<leader>ax", -- Normal mode: clear them
   -- Keys in the popup. Any of them can be `false` to leave it unmapped.
   submit_key = "<CR>", -- send the prompt
   newline_keys = { "<S-CR>", "<C-j>" }, -- Insert mode: a new line in the prompt
@@ -109,16 +113,15 @@ local config = {
   insert_keys = { "i", "a" }, -- in the conversation: back to the prompt
 }
 
--- The lines `range` ({ first, last }, from a command) names, else the Visual
--- selection's (leaving Visual mode), else nil.
+-- The range (a spec, see ranges.lua) `range` ({ first, last }, from a
+-- command) names, else the Visual selection's (leaving Visual mode), else nil.
 local function selection(range)
+  local ranges = require("float-claude.ranges")
   if range then
-    return range[1], range[2]
+    return ranges.lines(range[1], range[2])
   end
   if vim.fn.mode():match("^[vV\22]") then
-    local first, last = vim.fn.line("v"), vim.fn.line(".")
-    vim.cmd("normal! \27")
-    return math.min(first, last), math.max(first, last)
+    return ranges.visual()
   end
 end
 
@@ -126,21 +129,64 @@ local function in_popup()
   return vim.startswith(vim.bo.filetype, "float-claude")
 end
 
----Open the popup for the selected lines (Visual mode) or lines `range`
----({ first, last }). In Normal mode, focus the open popup (showing it if
----hidden), or open one for the current line.
+-- The ranges to ask about: the pending ones of the current buffer with
+-- `spec` added, else `spec` alone (nil without either).
+local function gather(spec)
+  local ranges, buf = require("float-claude.ranges"), vim.api.nvim_get_current_buf()
+  if #ranges.pending(buf) == 0 then
+    return spec and { spec }
+  end
+  if spec then
+    local ok, err = ranges.add(buf, spec)
+    if not ok then
+      return nil, "not asked: " .. err
+    end
+  end
+  return ranges.take(buf)
+end
+
+---Open the popup for the selected lines or block (Visual mode) or lines
+---`range` ({ first, last }), with the ranges collected by M.add() too. In
+---Normal mode, open it for the collected ranges, else focus the open popup
+---(showing it if hidden), or open one for the current line.
 function M.ask(range)
-  local first, last = selection(range)
+  local spec = selection(range)
   local chat = require("float-claude.chat")
   -- A selection in the popup itself is not a new chat.
-  if (not first or in_popup()) and chat.focus() then
+  if in_popup() and chat.focus() then
+    return
+  end
+  local specs, err = gather(spec)
+  if err then
+    return require("float-claude.util").error(err)
+  end
+  if not specs and chat.focus() then
     return
   end
   chat.open(vim.tbl_extend("force", config, {
-    first = first or vim.fn.line("."),
-    last = last or vim.fn.line("."),
-    selected = first ~= nil,
+    ranges = specs or { { first = vim.fn.line("."), last = vim.fn.line(".") } },
+    selected = specs ~= nil,
   }))
+end
+
+---Add the selected lines or block (Visual mode), lines `range` ({ first,
+---last }) or the current line to the ranges to ask about together: the next
+---M.ask() or action is about all of them.
+function M.add(range)
+  local ranges, util = require("float-claude.ranges"), require("float-claude.util")
+  local spec = selection(range) or { first = vim.fn.line("."), last = vim.fn.line(".") }
+  if in_popup() then
+    return util.error("select the range in the code")
+  end
+  local ok, err = ranges.add(vim.api.nvim_get_current_buf(), spec)
+  if not ok then
+    util.error("not added: " .. err)
+  end
+end
+
+---Clear the ranges collected by M.add().
+function M.clear()
+  require("float-claude.ranges").clear()
 end
 
 ---Run action `name`: send its prompt about the selected lines (Visual mode),
@@ -153,26 +199,41 @@ function M.run(name, range)
     return require("float-claude.util").error(string.format('unknown action "%s"', name))
   end
   local current = chat.current()
-  local buf, first, last
+  local buf, spec, specs
   if in_popup() and current then
     selection(range) -- a selection in the popup is not one of the code
+    local first, last
     buf, first, last = current.source()
+    specs = { { first = first, last = last } }
   else
-    buf, first, last = vim.api.nvim_get_current_buf(), selection(range)
-    if not first then
-      first, last = actions.range(action, buf, vim.fn.line("."), config)
+    buf, spec = vim.api.nvim_get_current_buf(), selection(range)
+    -- The collected ranges too; nothing is added to them or taken if the
+    -- action is not offered there.
+    specs = vim.list_extend(require("float-claude.ranges").pending(buf), { spec })
+    if #specs == 0 then
+      local first, last = actions.range(action, buf, vim.fn.line("."), config)
+      specs = { { first = first, last = last } }
     end
   end
-  if not actions.available(action, buf, first, last, config) then
-    local where = action.filetypes and table.concat(action.filetypes, ", ")
-      or action.prose and table.concat(config.prose_filetypes, ", ") .. " and comments"
-      or "code"
-    return require("float-claude.util").error(string.format("%s is for %s", name, where))
+  for _, s in ipairs(specs) do
+    if not actions.available(action, buf, s.first, s.last, config) then
+      local where = action.filetypes and table.concat(action.filetypes, ", ")
+        or action.prose and table.concat(config.prose_filetypes, ", ") .. " and comments"
+        or "code"
+      return require("float-claude.util").error(string.format("%s is for %s", name, where))
+    end
   end
   if in_popup() and current then
     return current.send(action.prompt)
   end
-  chat.open(vim.tbl_extend("force", config, { first = first, last = last, selected = true, send = action.prompt }))
+  if #require("float-claude.ranges").pending(buf) > 0 then
+    local err
+    specs, err = gather(spec)
+    if err then
+      return require("float-claude.util").error(err)
+    end
+  end
+  chat.open(vim.tbl_extend("force", config, { ranges = specs, selected = true, send = action.prompt }))
 end
 
 ---Pick what to do from a list (vim.ui.select): the actions offered here, open
@@ -205,12 +266,25 @@ function M.palette(range)
       end
     end
   end
+  local pending = #require("float-claude.ranges").pending(buf)
   table.insert(items, {
-    label = string.format("%-11s %s", current and not range and "back to the popup" or "ask", config.keymap or ""),
+    label = string.format("%-11s %s", current and not range and pending == 0 and "back to the popup" or "ask",
+      config.keymap or ""),
     run = function()
       M.ask(range)
     end,
   })
+  if not source then
+    table.insert(items, {
+      label = string.format("%-11s %s", "add range", config.add_range_key or ""),
+      run = function()
+        M.add(range)
+      end,
+    })
+  end
+  if pending > 0 then
+    table.insert(items, { label = string.format("%-11s %s", "clear", config.clear_ranges_key or ""), run = M.clear })
+  end
   if current and not current.hidden() then
     table.insert(items, { label = string.format("%-11s %s", "hide", config.hide_key or ""), run = current.hide })
   end
@@ -343,12 +417,20 @@ local function reopen(saved)
       return util.error(err)
     end
   end
-  -- The file may have changed since: the lines are kept within it.
+  -- The file may have changed since: the ranges are kept within it, and those
+  -- past its end left out (all of them: its last line).
   local count = vim.api.nvim_buf_line_count(0)
-  local first = math.min(saved.first, count)
+  local specs = {}
+  for _, s in ipairs(saved.ranges or { saved }) do
+    local rows = s.rows and vim.tbl_filter(function(row)
+      return row[1] <= count
+    end, s.rows)
+    if s.first <= count and (not rows or #rows > 0) then
+      table.insert(specs, { first = s.first, last = math.min(s.last, count), rows = rows, from = s.from })
+    end
+  end
   chat.open(vim.tbl_extend("force", config, {
-    first = first,
-    last = math.min(math.max(saved.last, first), count),
+    ranges = #specs > 0 and specs or { { first = count, last = count } },
     selected = saved.selected,
     restore = saved,
   }))
@@ -407,6 +489,18 @@ function M.setup(opts)
       M.ask()
     end, { desc = "float-claude: ask Claude" })
   end
+  if config.add_range_key then
+    vim.keymap.set({ "n", "x" }, config.add_range_key, function()
+      M.add()
+    end, { desc = "float-claude: add the selection to the ranges to ask about" })
+  end
+  if config.clear_ranges_key then
+    vim.keymap.set("n", config.clear_ranges_key, M.clear, { desc = "float-claude: clear the ranges to ask about" })
+  end
+  vim.api.nvim_create_user_command("FloatClaudeAdd", function(cmd)
+    M.add(cmd.range > 0 and { cmd.line1, cmd.line2 } or nil)
+  end, { range = true, desc = "float-claude: add the lines to the ranges to ask about" })
+  vim.api.nvim_create_user_command("FloatClaudeClear", M.clear, { desc = "float-claude: clear the ranges to ask about" })
   local chat_commands = {
     { "Next", config.next_chat_key, "show the next chat", function()
       M.cycle(1)
