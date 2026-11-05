@@ -583,6 +583,142 @@ test("review_edits: the diff streams on after leaving the popup; back in it, <le
   eq({ "function f(nums)", "  a()", "  b()", "  c()", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 5, false)"))
 end)
 
+test("block edit: each line's columns are replaced, a short line padded out to them; one u undoes it", function()
+  local log = setup({ "EDIT\nqux\nquux\nnew\nzap\n", "ANSWER\nok" })
+  lua([[vim.api.nvim_buf_set_lines(0, 0, -1, false, { "x = foo(1)", "y = bar(2)", "z", "w = baz(3)", "end" })]])
+  keys("1G04l<C-v>3j2l ai")
+  eq("  [No Name] · L1–4 · 4 lines · block", floats()["float-claude-transcript"].lines[2], "the header")
+  local sel = lua([[
+    local out = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(1, -1, 0, -1, { details = true })) do
+      if m[4].hl_group == "FloatClaudeSelection" then table.insert(out, { m[2], m[3], m[4].end_col }) end
+    end
+    return out
+  ]])
+  eq({ { 0, 4, 7 }, { 1, 4, 7 }, { 3, 4, 7 } }, vim.tbl_filter(function(m)
+    return m[3] > m[2]
+  end, sel), "the block's parts are highlighted")
+  keys("rename<CR>")
+  wait("return answered(1)", "the edit")
+  eq({ "x = qux(1)", "y = quux(2)", "z   new", "w = zap(3)", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, -1, false)"))
+  eq({ "  ❯ rename", "    refactored 4 → 4 lines · u to undo", "" }, turns())
+  keys("and now?<CR>")
+  wait("return answered(2)", "the answer")
+  local s = sent(log)
+  assert(s[2]:find("Selected: a block, a column range in lines 1-4 (each line below is the selected part of one line of it, "
+    .. "in order):\n<selection>\nfoo\nbar\n\nbaz\n</selection>\nRequest: rename", 1, true), s[2])
+  assert(s[3]:find("<selection>\nqux\nquux\n   new\nzap\n</selection>\nRequest: and now?", 1, true), "the follow-up: the new parts")
+  keys("<Esc>qu")
+  eq({ "x = foo(1)", "y = bar(2)", "z", "w = baz(3)", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, -1, false)"),
+    "after one undo")
+end)
+
+test("block edit: a $ block goes to each line's end; a row the reply leaves out is emptied, lines past them added", function()
+  local log = setup({ "EDIT\nx)\n", "EDIT\na)\nb)\nc)\nd\n" })
+  lua([[vim.api.nvim_buf_set_lines(0, 0, -1, false, { "call(a, 1)", "call(bb, 22)", "call(ccc, 333)", "end" })]])
+  keys("1G05l<C-v>2j$ ai")
+  keys("one<CR>")
+  wait("return answered(1)", "the edit")
+  assert(sent(log)[2]:find("<selection>\na, 1)\nbb, 22)\nccc, 333)\n</selection>", 1, true), sent(log)[2])
+  eq({ "call(x)", "call(", "call(", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, -1, false)"))
+  keys("two<CR>")
+  wait("return answered(2)", "the edit")
+  eq({ "call(a)", "call(b)", "call(c)", "d", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, -1, false)"))
+end)
+
+-- The pending ranges in buffer 1: { row, end row, label } each.
+local function pending()
+  return lua([[
+    local out = {}
+    local ns = vim.api.nvim_create_namespace("float-claude-ranges")
+    local labels = vim.api.nvim_create_namespace("float-claude-range-labels")
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(1, ns, 0, -1, { details = true })) do
+      table.insert(out, { m[2], m[4].end_row })
+    end
+    for i, m in ipairs(vim.api.nvim_buf_get_extmarks(1, labels, 0, -1, { details = true })) do
+      out[i][3] = m[4].virt_text[1][1]
+    end
+    return out
+  ]])
+end
+
+test("ranges: <leader>am collects ranges, numbered in file order; one sharing lines is refused; <leader>ax clears", function()
+  setup({})
+  keys("10GVj am")
+  keys("2G am")
+  eq({ { 1, 2, " range 1" }, { 9, 11, " range 2" } }, pending(), "highlighted and numbered")
+  keys("1GVj am")
+  eq("float-claude: not added: it shares lines with range 1", last_message())
+  eq(2, #pending(), "not added")
+  lua("vim.cmd.enew()")
+  keys(" am")
+  eq("float-claude: not added: the collected ranges are in [No Name]", last_message(), "another buffer")
+  lua("vim.cmd.buffer(1)")
+  keys(" ax")
+  eq({}, pending(), "cleared")
+  keys(":4,5FloatClaudeAdd<CR>")
+  eq({ { 3, 5, " range 1" } }, pending(), ":FloatClaudeAdd")
+end)
+
+test("ranges: one reply edits several ranges in place, each by its number; one u undoes them all", function()
+  local log = setup({
+    "EDIT\n@@ range 2 @@\n-- ten\n-- eleven\n-- more\n@@ range 1 @@\n  for _, a in ipairs(nums) do\n",
+    "ANSWER\nok",
+  })
+  keys("2GVj am")
+  keys("10GVj ai")
+  eq("  [No Name] · L2–3, L10–11 · 2 ranges", floats()["float-claude-transcript"].lines[2], "the header")
+  eq({}, pending(), "the chat took the collected ranges")
+  keys("go<CR>")
+  wait("return answered(1)", "the edit")
+  eq({ "function f(nums)", "  for _, a in ipairs(nums) do", "      print(i, j)", "    end", "  end", "end", "-- 8", "-- 9",
+    "-- ten", "-- eleven", "-- more", "-- 12" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 12, false)"))
+  eq({ "  [No Name] · L2, L9–11 · 2 ranges", "  ❯ go", "    refactored ranges 1, 2 · u to undo" },
+    vim.list_slice(floats()["float-claude-transcript"].lines, 2, 4), "the ranges follow the edit")
+  keys("and now?<CR>")
+  wait("return answered(2)", "the answer")
+  local s = sent(log)
+  assert(s[2]:find("Selected ranges (2), numbered in file order:\nRange 1: lines 2-3:\n<range 1>\n"
+    .. "  for i = 1, #nums do\n    for j = i + 1, #nums do\n</range 1>\nRange 2: lines 10-11:\n<range 2>\n-- 10\n-- 11\n</range 2>\n",
+    1, true), s[2])
+  assert(s[3]:find('#1 "go": range 1 (lines 2-3) became line 2, range 2 (lines 10-11) became lines 9-11\n', 1, true), s[3])
+  assert(s[3]:find("<range 1>\n  for _, a in ipairs(nums) do\n</range 1>\nRange 2: lines 9-11:\n<range 2>\n-- ten\n-- eleven\n"
+    .. "-- more\n</range 2>\nRequest: and now?", 1, true), "the follow-up: every range as it is now")
+  keys("<Esc>qu")
+  eq(ORIGINAL, buffer(), "after one undo")
+  eq({ "-- 10", "-- 11" }, lua("return vim.api.nvim_buf_get_lines(1, 9, 11, false)"), "range 2 too")
+end)
+
+test("ranges: review_edits shows a diff per range, a block's too; one accept writes all; one u undoes it", function()
+  setup({ "EDIT\n@@ range 2 @@\nX\nY\n@@ range 1 @@\n  a()\n" }, 0, { review_edits = true })
+  keys("2GVj am")
+  keys("10G03l<C-v>j1l am")
+  keys(" ai")
+  keys("go<CR>")
+  wait("return reviewing()", "the diff")
+  eq(ORIGINAL, buffer(), "nothing written yet")
+  eq({ removed = { 1, 2, 9, 10 }, added = { { 2, false, { "  a()" } }, { 10, false, { "-- X", "-- Y" } } } },
+    lua("return diff_view()"), "a diff per range")
+  eq({ "  ❯ go", "    review: ranges 1, 2", "    <leader>yy accept · <leader>nn discard", "" }, turns())
+  keys(" yy")
+  eq({ "-- 8", "-- 9", "-- X", "-- Y", "-- 12" }, lua("return vim.api.nvim_buf_get_lines(1, 6, 11, false)"))
+  eq("  a()", lua("return vim.api.nvim_buf_get_lines(1, 1, 2, false)[1]"))
+  eq({ "  ❯ go", "    refactored ranges 1, 2 · u to undo", "" }, turns())
+  keys("<Esc>qu")
+  eq(ORIGINAL, buffer(), "after one undo")
+  eq({ "-- 10", "-- 11" }, lua("return vim.api.nvim_buf_get_lines(1, 9, 11, false)"), "range 2 too")
+end)
+
+test("ranges: an action is about the collected ranges and the selection", function()
+  local log = setup({ "ANSWER\nok" })
+  keys("2G am")
+  keys("10GVj ae")
+  wait("return answered(1)", "the answer")
+  local msg = sent(log)[2]
+  assert(msg:find("Range 1: line 2:\n<range 1>\n  for i = 1, #nums do\n</range 1>\nRange 2: lines 10-11:", 1, true), msg)
+  assert(vim.endswith(msg, "Request: Explain what this code does."), msg)
+end)
+
 test("answer: a screen narrower than the popup caps its width and still wraps", function()
   setup({ "ANSWER\nok then" })
   vim.rpcrequest(chan, "nvim_ui_try_resize", 12, 24) -- the narrowest Neovim allows
@@ -1563,9 +1699,10 @@ test(":FloatClaude lists the actions offered here and runs the one picked", func
     "tests       <leader>at",
     "types       <leader>ay",
     "ask         <leader>ai",
+    "add range   <leader>am",
     "history     <leader>aH",
     "theme       auto",
-  }, lua("return listed"), "code actions, ask, history, theme")
+  }, lua("return listed"), "code actions, ask, add range, history, theme")
   pick("simplify")
   keys("2GVj:FloatClaude<CR>")
   wait("return answered(1)", "the answer")
@@ -1591,8 +1728,8 @@ test("prose actions: reword edits a markdown paragraph in place; offered on comm
     vim.bo.filetype = "markdown"]])
   pick("nothing")
   keys("3G:FloatClaude<CR>")
-  eq({ "grammar     <leader>ag", "reword      <leader>ar", "shorten     <leader>ah", "ask         <leader>ai", "history     <leader>aH",
-    "theme       auto" },
+  eq({ "grammar     <leader>ag", "reword      <leader>ar", "shorten     <leader>ah", "ask         <leader>ai", "add range   <leader>am",
+    "history     <leader>aH", "theme       auto" },
     lua("return listed"), "prose actions only")
   keys(" ar")
   wait("return answered(1)", "the edit")
@@ -2000,6 +2137,28 @@ test("history: a session that cannot be resumed starts afresh with the conversat
   eq({ {}, true }, { lua([[return require("float-claude.history").list()]]), starts(log)[1]:find("--no-session-persistence", 1, true) ~= nil })
   keys("<Esc>:FloatClaudeHistory<CR>")
   eq("float-claude: history is off", last_message())
+end)
+
+test("history: a chat about several ranges, one a block, reopens on the same ranges", function()
+  setup({ "ANSWER\nok" })
+  local dir = workdir({ ["demo.lua"] = ORIGINAL })
+  keys(":edit demo.lua<CR>")
+  keys("2GVj am")
+  keys("4G04l<C-v>j1l ai")
+  keys("q?<CR>")
+  wait("return answered(1)", "the answer")
+  keys("<Esc>q")
+  restart()
+  local log = setup({ "ANSWER\nok" })
+  lua("vim.cmd.cd(...)", dir)
+  keys(":edit demo.lua<CR>")
+  pick("demo.lua")
+  keys(":FloatClaudeHistory<CR>")
+  eq("  demo.lua · L2–3, L4–5 · 2 ranges", shown_header())
+  keys("and?<CR>")
+  wait("return answered(2)", "the answer")
+  assert(sent(log)[2]:find("Range 2: a block, a column range in lines 4-5 (each line below is the selected part of one line "
+    .. "of it, in order):\n<range 2>\n  \nen\n</range 2>", 1, true), sent(log)[2])
 end)
 
 test("history: retention keeps the latest max chats, none older than days", function()
