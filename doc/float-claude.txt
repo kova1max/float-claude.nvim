@@ -1,0 +1,607 @@
+*float-claude.txt*  Ask Claude about the selected code in a small popup
+
+                                            *float-claude* *float-claude.nvim*
+
+Select some lines, press `<leader>ai`, type a prompt in the borderless popup
+and press Enter. Claude decides what the prompt needs:
+
+- an edit: "use a hash map, one pass". The selected lines are rewritten in
+  place, streaming in line by line. The popup stays open, so you can keep
+  going ("also rename x"); each edit is one |u| in the buffer.
+- an answer: "what's the time complexity?". The answer streams into the
+  popup and you can ask follow-ups. Code in it is highlighted, and with LSP
+  the names in it jump to their definitions.
+
+Replies come from the Claude Code CLI (`claude`) running headless in the
+background, one process per chat, so follow-ups continue the same
+conversation. No API key and no HTTP code in the plugin: it uses whatever the
+CLI is signed in with, such as your Claude subscription.
+
+1. Requirements                                 |float-claude-requirements|
+2. Setup                                        |float-claude-setup|
+3. Usage                                        |float-claude-usage|
+4. Keys                                         |float-claude-keys|
+5. Hiding and leaving the popup                 |float-claude-hide|
+6. Blocks                                       |float-claude-blocks|
+7. Several ranges                               |float-claude-ranges|
+8. Actions                                      |float-claude-actions|
+9. Mentions                                     |float-claude-mentions|
+10. Model and effort                            |float-claude-model|
+11. Several chats                               |float-claude-chats|
+12. History                                     |float-claude-history|
+13. Statusline                                  |float-claude-statusline|
+14. Code in answers                             |float-claude-answers|
+15. Reviewing edits                             |float-claude-review|
+16. What Claude sees                            |float-claude-context|
+17. Your own instructions                       |float-claude-prompt|
+18. Themes                                      |float-claude-themes|
+19. Commands                                    |float-claude-commands|
+20. Lua API                                     |float-claude-api|
+21. Configuration                               |float-claude-config|
+22. Health and troubleshooting                  |float-claude-health|
+
+==============================================================================
+1. Requirements                                    *float-claude-requirements*
+
+- Neovim 0.10, 0.11 or 0.12 (the tests run on 0.10.0 and the latest stable).
+- The `claude` CLI (Claude Code) on your `PATH`, signed in: run `claude`
+  once in a terminal and sign in.
+
+No other plugin is needed. Treesitter parsers (for code in answers) and an
+LSP server (for names that jump to their definitions) are used when present.
+
+==============================================================================
+2. Setup                                                  *float-claude-setup*
+
+With lazy.nvim: >lua
+    { "kova1max/float-claude.nvim", opts = {} }
+<
+Or call |float-claude.setup()| yourself: >lua
+    require("float-claude").setup({})
+<
+`setup()` maps the keys and creates the commands; it loads nothing else until
+you use them. Changed an option? Restart Neovim for it to apply.
+
+==============================================================================
+3. Usage                                                  *float-claude-usage*
+
+Select lines (|v| or |V|) or a block (|CTRL-V|) and press `<leader>ai`. The
+popup opens pinned to the editor's top-right corner (or next to the cursor,
+see `placement`); the selection stays highlighted while it is open. Type the
+prompt and press <CR>. In Normal mode, `<leader>ai` goes back to the open
+popup (shown again if hidden), or with none open asks about the current line.
+
+The popup's first line names the file and the lines Claude sees: >
+    two_sum.lua · L5–13 · 9 lines
+    ❯ what's the time complexity?
+      O(n²): the two loops compare every pair in nums.
+
+    ❯ █
+<
+Past questions are dimmed, replies are indented under them, and a fresh `❯`
+prompt waits at the bottom.
+
+The popup has a fixed width (`width`) and grows downwards with the
+conversation; a longer prompt or answer wraps onto more rows, never scrolling
+sideways. The conversation scrolls like a chat: once it no longer fits, each
+new question moves to the top of the popup and the answer streams in below
+it, following the newest line. Scroll back and the view stays put while the
+answer streams and while you type the next prompt; scroll down again to
+follow. The history is read-only. While a reply streams, the cursor sits in
+the conversation, so Normal-mode motions scroll it too; `q` closes. With
+'mouse' off, most terminals send the wheel as arrow keys, so the wheel still
+scrolls.
+
+An edit streams into the buffer line by line with the new lines briefly
+highlighted. The popup stays open with a note such as
+`refactored 9 → 9 lines · u to undo`, and a follow-up edit works on the
+lines as they are now. `q` while an edit is still streaming stops it and puts
+the original lines back.
+
+==============================================================================
+4. Keys                                                    *float-claude-keys*
+
+Every key below is a setup option (|float-claude-config|); any of them can be
+`false` to leave it unmapped.
+
+Key                     Where           Action ~
+<leader>ai              Visual          ask about the selected lines or block
+<leader>ai              Normal          back to the open popup; with none
+                                        open, ask about the current line
+<leader>am              Visual, Normal  add the selection (Normal: the current
+                                        line) to the ranges to ask about
+                                        together, see |float-claude-ranges|
+<leader>ax              Normal          clear those ranges
+<CR>                    popup           send the prompt
+<S-CR> or <C-j>         popup, Insert   new line in the prompt (use <C-j> if
+                                        your terminal does not send <S-CR>)
+<C-u> / <C-d>           popup           scroll the conversation half a screen
+<Up> / <Down>           popup           scroll it a line (in a multi-line
+                                        prompt, first move between its lines)
+<Esc>                   popup           leave Insert mode, as anywhere
+q                       popup, Normal   close it and end the chat; a
+                                        half-written edit is undone
+<C-q>                   popup           hide it; the chat goes on
+<C-o>                   popup           back to the code; the popup stays on
+                                        screen
+<leader>yy / <leader>nn popup           with review_edits: accept / discard
+                                        the edit shown as a diff
+<CR> / K                conversation    on an underlined name: jump to its
+                                        definition / show its hover
+<leader>ae, ...         Normal, Visual  one-key actions, see
+                                        |float-claude-actions|
+@                       popup           mention a file, a buffer or
+                                        @diagnostics, see
+                                        |float-claude-mentions|
+<leader>an / <leader>ap Normal          show the next / previous open chat
+<leader>al              Normal          pick an open chat from a list
+<leader>aH              Normal          reopen a saved chat, see
+                                        |float-claude-history|
+
+==============================================================================
+5. Hiding and leaving the popup                            *float-claude-hide*
+
+The popup does not have to be in the way, and does not have to go away:
+
+- <C-q> hides it and puts you back in the code. The conversation goes on: an
+  answer keeps streaming and an edit keeps writing while it is hidden.
+- <C-o> (or leaving it any other way: another window, a split, another file)
+  puts you back in the code with the popup still on screen, on top of
+  whatever is shown there. It stays where it opened and answers keep
+  streaming into it.
+
+`<leader>ai` in Normal mode brings you back into it, showing it first if
+hidden, with the same conversation and scroll position. A new Visual
+selection with `<leader>ai` starts another chat, and the open one waits hidden
+(|float-claude-chats|). `q` in the popup (Normal mode; <Esc> first if you are
+typing) or |:q| in it closes it and ends the conversation. Prefer the popup to
+go away on its own? See `close_after_edit` and `close_on_leave`. Files never
+open inside the popup; |:e| there is refused.
+
+==============================================================================
+6. Blocks                                                *float-claude-blocks*
+
+Select a block with |CTRL-V| and the chat is about just those columns: Claude
+gets the selected part of each line (with the whole lines around them as
+context), and an edit replaces exactly those columns on each line, leaving the
+text left and right of the block alone. It works on ragged lines too: a line
+that ends inside the block has its part up to its end, a block extended with
+`$` goes to each line's end, and new text for a line that ends before the
+block is padded with spaces out to the block's column. A character only partly
+in the block (a tab, a wide character) counts as in it.
+
+Claude replies one line per line of the block. A line it leaves out has its
+part emptied, and lines past the block's are added below it. The edit streams
+in line by line and is one |u|, as for lines; follow-ups send each line's part
+as it is then.
+
+==============================================================================
+7. Several ranges                                        *float-claude-ranges*
+
+To ask about separate parts of a file at once, collect them first: select one
+and press `<leader>am` (|:FloatClaudeAdd|), repeat for the others, then select
+the last one and press `<leader>ai` (or press `<leader>ai` in Normal mode to
+ask about the ones collected). Each range can be lines or a block. The
+collected ranges are highlighted and numbered in file order (`range 1`,
+`range 2`, ...) at the end of their first line; `<leader>ax` (|:FloatClaudeClear|) clears
+them. They are all in one file, and must not share lines: adding one in
+another file, or overlapping one already collected, is refused with a
+message. A one-key action works on the collected ranges too, plus the
+selection.
+
+Claude gets each range by its number, and answers about them, or edits them
+in one reply: each range it changes is replaced in place (the others stay as
+they are), and ranges below one that grew or shrank stay on their lines. All
+of the reply's changes are one |u|. With `review_edits`, each changed range
+shows its own diff, and one accept writes them all (one discard drops them
+all). Every follow-up sends every range as it is then.
+
+If you delete all the lines of a range while its chat is open, the chat drops
+that range with a note such as `range 1 was deleted`, and the ranges left are
+numbered anew in the next message. Lines replaced as a whole count as deleted
+too: a filter such as `:%!fmt`, or a formatter that rewrites the whole buffer.
+When the last range left is deleted, the chat stays open but is ask-only: it
+sends no selection and does not apply an edit (select the code again in a new
+chat). While Claude is replying, the ranges keep their numbers; an edit for
+ranges of which one was deleted, or that now share lines, is not applied, and
+the reply stays in the chat as an answer with a note. |u| after an applied
+edit puts the ranges back on the old lines; redo (|CTRL-R|) after that
+replaces those lines again, so those ranges count as deleted then.
+
+==============================================================================
+8. Actions                                              *float-claude-actions*
+
+One key sends a ready-made prompt: the popup opens and the prompt goes out
+right away, as if you had typed it.
+
+Key           Action      Prompt ~
+<leader>ae    explain     Explain what this code does.
+<leader>af    fix         Fix the problems the diagnostics report ...
+<leader>at    tests       Write unit tests for this code ... (an answer)
+<leader>ay    types       Add type annotations to this code ...
+<leader>ad    docstring   Add a doc comment to each function ...
+<leader>as    simplify    Simplify this code without changing what it does.
+<leader>ar    reword      Reword this text so it reads clearly ... (prose)
+<leader>ah    shorten     Shorten this text; keep its meaning. (prose)
+<leader>ag    grammar     Fix the spelling, grammar and punctuation. (prose)
+
+In Visual mode an action works on the selected lines. In Normal mode it picks
+the lines for you and highlights them: for a code action, the function around
+the cursor (found with treesitter; without a parser, or outside a function,
+the current line); for a prose action, the paragraph around the cursor in a
+prose buffer, or the block of comment lines around it in code. In the popup an
+action is a follow-up about the same lines, and outside it an action always
+starts another chat.
+
+Buffers whose filetype is in `prose_filetypes` (Markdown, commit messages,
+plain text) offer the prose actions instead of the code ones; in code, the
+prose actions work on comments. An action where it is not offered says so and
+does nothing.
+
+Change an action's key or prompt, remove one, or add your own in `actions`;
+each action is merged on its own, so you only give what changes: >lua
+    opts = {
+      actions = {
+        explain = { key = "<leader>aE" }, -- another key, same prompt
+        simplify = false, -- no simplify action
+        todo = { key = "<leader>ao", prompt = "List the TODOs in it." },
+        commit = {
+          key = "<leader>ac",
+          prompt = "Write a commit message for this diff.",
+          filetypes = { "gitcommit" },
+        },
+      },
+    }
+<
+An action is `{ key, prompt }` (`key = false`: no mapping, still in
+|:FloatClaude|), plus `prose = true` to offer it for prose and comments
+instead of code, or `filetypes = { ... }` to offer it only in those filetypes:
+its key is then mapped only in buffers of those filetypes (and in the popup of
+a chat about one), and |:FloatClaude| lists it only there.
+
+==============================================================================
+9. Mentions                                            *float-claude-mentions*
+
+Type `@` in the prompt to send more than the selection with the message:
+
+- `@diagnostics`: all diagnostics of the file, not only those in the
+  selected lines;
+- `@<buffer>`: an open buffer, by its path (or just its file name, when no
+  other open buffer has it), with its text as it is now, unsaved changes
+  included;
+- `@<path>`: any other file, relative to the current directory, read from
+  disk.
+
+The conversation lists what each message sent, under the question. A mention
+sends at most `mentions.max_lines` lines (500); a longer file sends its first
+lines, and Claude is told the rest was not sent. A binary file is not sent. An
+`@` that names nothing stays plain text, and so does one inside a word
+(`me@example.com`).
+
+Typing `@` opens the built-in completion menu: `diagnostics`, the open
+buffers, then the files and directories in the current directory. <C-n> and
+<C-p> pick an item and <CR> takes it, while <CR> with nothing picked sends the
+prompt. On Neovim 0.10 the menu opens as you type only when 'completeopt' has
+`noselect` or `noinsert` (else press |i_CTRL-X_CTRL-O|); from 0.11 the popup
+sets its own. `mentions = false` turns mentions off.
+
+==============================================================================
+10. Model and effort                                      *float-claude-model*
+
+Each chat starts with the `model` and `effort` from setup (by default the
+CLI's own), shown at the end of the header. |:FloatClaudeModel| switches the
+open chat's model and |:FloatClaudeEffort| its effort, from the next message
+on: the running `claude` process is told to switch, so nothing restarts and
+nothing is lost. A model the CLI refuses shows an error and the chat keeps its
+model. The next chat starts with the setup values again.
+
+==============================================================================
+11. Several chats                                         *float-claude-chats*
+
+A chat you hide keeps going, and opening the popup on a new selection (or
+running an action outside the popup) starts another chat instead of ending
+it: up to `max_chats` (5) chats live side by side, one per selection, each
+bound to its own lines and with its own `claude` process. One is on screen at
+a time; with more than one open, the header says which (`2/3`).
+
+- `<leader>an` / `<leader>ap` (|:FloatClaudeNext| / |:FloatClaudePrev|) show
+  the next / previous chat, wrapping around;
+- `<leader>al` (|:FloatClaudeChats|) picks one from a list, which also says
+  which ones are still answering or have a reply you have not seen;
+- `<leader>ai` in Normal mode goes back to the chat shown last.
+
+One chat edits a file at a time: while one chat's edit is writing into a file,
+or its diff waits for review, an edit another chat replies with is shown as an
+answer with a note, and Claude is told with the next message. `q` ends only
+the chat it is pressed in. Opening one more than `max_chats` ends the one used
+longest ago (it stays in the history).
+
+==============================================================================
+12. History                                             *float-claude-history*
+
+Each chat about a file is saved once a reply ends: its file and lines, the
+conversation, Claude's edits, the model and effort, and the CLI's session id.
+`<leader>aH` (|:FloatClaudeHistory|) lists the saved chats about the current
+file or any file under the current directory, latest first. Picking one opens
+its file and reopens the chat on the same lines, with the conversation as it
+was, also after restarting Neovim. The `claude` process resumes the chat's
+session (`claude --resume`), so Claude remembers it, and the next message
+sends the code as it is now. If the session cannot be resumed, the next
+message sends the conversation so far as text instead.
+
+Chats are saved under `stdpath("state")/float-claude`, one JSON file each;
+the latest 100 are kept, none older than 30 days (`history = { max = 100,
+days = 30 }`, either can be `false`). `history = false` saves nothing, and the
+CLI then saves no sessions either.
+
+==============================================================================
+13. Statusline                                       *float-claude-statusline*
+
+|float-claude.status()| returns a spinner while a hidden chat is answering,
+`●` when one has a reply you have not seen yet (until you show it), and `""`
+otherwise. With lualine: >lua
+    sections = {
+      lualine_x = { function() return require("float-claude").status() end },
+    }
+<
+Or in a plain 'statusline': >vim
+    set statusline=%f\ %=\ %{v:lua.require'float-claude'.status()}
+<
+The icons are the `status` option.
+
+==============================================================================
+14. Code in answers                                     *float-claude-answers*
+
+Answers put names from the code in `inline code` and snippets in fenced code
+blocks. The popup shows them without the backticks and fences, highlighted
+with treesitter in the file's language (or the language a fence names).
+Without a parser for the language the code stays plain; Neovim ships parsers
+for Lua, Vim script, C, Markdown and a few more, and others come from e.g.
+nvim-treesitter.
+
+With an LSP server attached to the file, names in the code that the server
+knows are underlined. They are looked up in the background, so answers never
+wait for the server. In the conversation (<C-w>w from the prompt, or a click),
+<CR> or a click on an underlined name jumps to its definition in the code
+window, with the popup staying on screen, and `K` shows the server's hover for
+it.
+
+==============================================================================
+15. Reviewing edits                                      *float-claude-review*
+
+With `review_edits = true`, an edit is not applied straight away. It shows as
+an inline diff in the buffer: the removed lines turn red and the new lines
+stream in as green virtual lines under them. The buffer stays untouched and
+locked until you decide in the popup:
+
+- `<leader>yy` accepts: the new lines are written, and one |u| brings back
+  the original.
+- `<leader>nn` discards: the buffer is exactly as before, and Claude is told
+  with your next message.
+
+The popup stays open either way. Hiding or leaving the popup keeps the diff
+waiting; closing the popup before deciding discards the edit.
+
+==============================================================================
+16. What Claude sees                                    *float-claude-context*
+
+Claude gets the file name and filetype, the selected lines, up to
+`context_lines` (40) lines around them, and the diagnostics in the selected
+lines (`diagnostics = false` leaves them out), plus whatever the message
+mentions with `@`. Every follow-up sends the selected lines again as they are
+at that moment, and the diagnostics as they are then, so Claude always works
+on the current code: the selection follows its applied edits, your own changes
+and lines added or removed above it.
+
+Claude also remembers what it changed: each follow-up starts with a short
+record of what happened since its last reply, as diffs: its edit (applied,
+accepted or discarded), your own changes near the selection, and the numbered
+list of its edits so far. So "undo your second change" reverts just that one.
+
+The CLI runs with no tools, MCP servers, hooks or settings files, so it only
+reads what the popup sends. Your Claude Code hooks, `CLAUDE.md` files and
+`settings.json` are not used; auth comes from your normal `claude` login or
+from environment variables such as `ANTHROPIC_API_KEY` set in the shell
+Neovim runs in.
+
+==============================================================================
+17. Your own instructions                                *float-claude-prompt*
+
+`prompt` tells Claude something in every chat: a string, or a function that
+gets `{ buf, file, filetype }` and returns one (or nil): >lua
+    opts = {
+      prompt = function(ctx)
+        if ctx.filetype == "go" then
+          return "Wrap errors with fmt.Errorf and %w."
+        end
+      end,
+    }
+<
+With `project_prompt = ".float-claude.md"` (or another file name), that file
+in the file's directory or any directory above it (the nearest wins) is added
+after `prompt`. It is off by default because a cloned repository could bring
+such a file and steer the replies you get. Both come after the built-in
+instructions, and the reply format always wins over them.
+
+==============================================================================
+18. Themes                                               *float-claude-themes*
+
+The popup follows your colorscheme by default (`theme = "auto"`). Or give it a
+look of its own with `theme`: `night-owl`, `dracula`, `tokyonight`,
+`catppuccin`, `gruvbox`, `nord`, `onedark`, `rose-pine`, or `float-claude`
+(near-black with a cyan `❯`). A theme colors the popup only, plus the
+selection and diff lines in the code. |:FloatClaudeTheme| switches it for the
+session. `colors` sets single colors on top of any theme: >lua
+    opts = {
+      theme = "tokyonight",
+      colors = { bg = "#000000", prompt = "#ff9e64" },
+    }
+<
+Colors: `bg`, `fg`, `prompt`, `history`, `header`, `code`, `selection`,
+`added`, `removed`, and for code in answers `comment`, `keyword`, `string`,
+`number`, `func`, `type`, `constant`, `operator`, `property`.
+
+                   *FloatClaudeNormal* *FloatClaudePrompt* *FloatClaudeHeader*
+                      *FloatClaudeHistory* *FloatClaudeCode* *FloatClaudeLink*
+                *FloatClaudeSelection* *FloatClaudeAdded* *FloatClaudeRemoved*
+The popup's highlight groups are FloatClaudeNormal, FloatClaudePrompt,
+FloatClaudeHistory, FloatClaudeHeader, FloatClaudeCode, FloatClaudeSelection,
+FloatClaudeAdded, FloatClaudeRemoved and FloatClaudeLink (underlined names).
+The plugin sets them from the theme, so change them through `theme` and
+`colors`.
+
+==============================================================================
+19. Commands                                           *float-claude-commands*
+
+                                                                *:FloatClaude*
+:[range]FloatClaude     Pick from a list (|vim.ui.select()|): the actions
+                        offered here, open or hide the popup, add or clear
+                        ranges, switch chats, reopen a saved chat, and switch
+                        the theme, model or effort. With a [range] the pick
+                        works on those lines.
+
+                                                             *:FloatClaudeAdd*
+:[range]FloatClaudeAdd  Add the lines (or the current line) to the ranges to
+                        ask about together.
+
+                                                           *:FloatClaudeClear*
+:FloatClaudeClear       Clear the collected ranges.
+
+                                         *:FloatClaudeNext* *:FloatClaudePrev*
+:FloatClaudeNext        Show the next open chat.
+:FloatClaudePrev        Show the previous open chat.
+
+                                                           *:FloatClaudeChats*
+:FloatClaudeChats       Pick an open chat from a list.
+
+                                                         *:FloatClaudeHistory*
+:FloatClaudeHistory     Pick a saved chat to reopen.
+
+                                                           *:FloatClaudeModel*
+:FloatClaudeModel [model]
+                        Switch the open chat's model (`opus`, `sonnet`,
+                        `haiku`, `fable` or any model name the CLI takes);
+                        without an argument, pick one from a list.
+
+                                                          *:FloatClaudeEffort*
+:FloatClaudeEffort [level]
+                        Switch the open chat's effort (`low`, `medium`,
+                        `high`, `xhigh`, `max`); without an argument, pick
+                        one from a list.
+
+                                                           *:FloatClaudeTheme*
+:FloatClaudeTheme {name}
+                        Switch the popup's theme for this session.
+
+==============================================================================
+20. Lua API                                                 *float-claude-api*
+
+                                                        *float-claude.setup()*
+require("float-claude").setup({opts})
+    Set the options (|float-claude-config|), map the keys and create the
+    commands.
+
+                                                          *float-claude.ask()*
+require("float-claude").ask([{range}])
+    What `keymap` does: open the popup for the selection, or for lines
+    {range} (`{ first, last }`), with the collected ranges too; in Normal
+    mode, the collected ranges, else the open popup, else the current line.
+
+                                                          *float-claude.add()*
+require("float-claude").add([{range}])
+    Add the selection, lines {range} or the current line to the ranges to
+    ask about together.
+
+                                                        *float-claude.clear()*
+require("float-claude").clear()
+    Clear the collected ranges.
+
+                                                          *float-claude.run()*
+require("float-claude").run({name} [, {range}])
+    Run action {name} on the selection, lines {range}, or the lines around
+    the cursor.
+
+                                                       *float-claude.status()*
+require("float-claude").status()
+    For a statusline: a spinner while a hidden chat is answering, `●` when
+    one has a reply you have not seen, else `""`.
+
+                                                       *float-claude.config()*
+require("float-claude").config()
+    The options in use: the defaults with those given to setup() on top.
+
+==============================================================================
+21. Configuration                                        *float-claude-config*
+
+Every option, with its default (`opts` for lazy.nvim, or the table given to
+|float-claude.setup()|). Any key can be `false` to leave it unmapped. A table
+option (like `cursor_offset`) is replaced as a whole, so give all of its
+fields; `actions` is the exception, merged action by action. >lua
+    {
+      keymap = "<leader>ai", -- Visual + Normal: ask / back to the popup
+      cmd = { "claude" }, -- the CLI, with extra arguments if you like
+      model = false, -- "opus", "sonnet", "haiku", "fable" or a model name
+      effort = false, -- "low", "medium", "high", "xhigh" or "max"
+      mentions = { max_lines = 500 }, -- @ mentions; false: off
+      prompt = false, -- your instructions: a string or function(ctx)
+      project_prompt = false, -- e.g. ".float-claude.md"
+      context_lines = 40, -- unselected lines sent above and below
+      diagnostics = true, -- send the diagnostics in the selected lines
+      actions = { ... }, -- see |float-claude-actions|
+      prose_filetypes = { "markdown", "gitcommit", "text" },
+      max_chats = 5, -- chats open at once
+      history = { max = 100, days = 30 }, -- false: off
+      status = { spinner = { "◐", "◓", "◑", "◒" }, unread = "●" },
+      width = 50, -- popup width in columns, capped to the screen
+      max_height = false, -- popup height cap in rows
+      placement = "top-right", -- or "cursor": next to the cursor
+      top_right_offset = { row = 0, col = 0 },
+      cursor_offset = { row = 1, col = 3 },
+      theme = "auto", -- or a preset, see |float-claude-themes|
+      colors = {}, -- single colors over the theme
+      review_edits = false, -- true: show an edit as a diff first
+      close_after_edit = false, -- true: close once an edit is applied
+      close_on_leave = false, -- true: leaving the popup closes it
+      -- Normal mode keys for the open chats:
+      next_chat_key = "<leader>an",
+      prev_chat_key = "<leader>ap",
+      chats_key = "<leader>al",
+      history_key = "<leader>aH",
+      add_range_key = "<leader>am", -- Visual and Normal mode
+      clear_ranges_key = "<leader>ax",
+      -- Keys in the popup:
+      submit_key = "<CR>",
+      newline_keys = { "<S-CR>", "<C-j>" },
+      close_key = "q",
+      hide_key = "<C-q>",
+      unfocus_key = "<C-o>",
+      accept_key = "<leader>yy",
+      discard_key = "<leader>nn",
+      scroll_up_key = "<C-u>",
+      scroll_down_key = "<C-d>",
+      line_up_key = "<Up>",
+      line_down_key = "<Down>",
+      jump_key = "<CR>",
+      hover_key = "K",
+      insert_keys = { "i", "a" },
+    }
+<
+The README lists every option with a comment on each:
+https://github.com/kova1max/float-claude.nvim#configuration
+
+==============================================================================
+22. Health and troubleshooting                           *float-claude-health*
+
+`:checkhealth float-claude` checks the Neovim version, that setup() has run,
+that the CLI runs (`claude --version`), and that no other mapping took the
+plugin's keys.
+
+- Updated the plugin? Restart Neovim: a running Neovim keeps the old code.
+- Nothing happens on Enter, or an error says the CLI failed: run `claude` in
+  a terminal and sign in; check `:checkhealth float-claude`.
+- A key does nothing: another plugin may map it; `:checkhealth float-claude`
+  names the mapping. Change the key in setup().
+- No mention menu on Neovim 0.10: add `noselect` to 'completeopt', or press
+  |i_CTRL-X_CTRL-O|.
+
+ vim:tw=78:ts=8:ft=help:norl:

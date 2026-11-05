@@ -135,6 +135,28 @@ function M.jump(target)
   vim.lsp.util.show_document(target.location, client and client.offset_encoding or "utf-16", { focus = true })
 end
 
+-- open_floating_preview() sizes a hover by the rows of the window it opens
+-- from, and the conversation's few rows would cut it short: size it by the
+-- screen instead, on the side of the cursor with more rows, as tall as its text.
+local function fit(hover)
+  local config = vim.api.nvim_win_get_config(hover)
+  local border = type(config.border) == "table" and config.border or {}
+  local function edge(i) -- 1 if the border has its top (i = 2) or bottom (6) edge
+    local c = #border > 0 and border[(i - 1) % #border + 1]
+    return c and (type(c) == "table" and c[1] or c) ~= "" and 1 or 0
+  end
+  local row = vim.fn.screenpos(0, vim.fn.line("."), vim.fn.col(".")).row
+  local above, below = row - 1, vim.o.lines - vim.o.cmdheight - row
+  local down = below >= above
+  vim.api.nvim_win_set_config(hover, {
+    relative = "cursor",
+    anchor = (down and "N" or "S") .. config.anchor:sub(2),
+    row = down and 1 or 0,
+    col = config.col,
+    height = math.max(1, math.min(vim.api.nvim_win_text_height(hover, {}).all, (down and below or above) - edge(2) - edge(6))),
+  })
+end
+
 ---Show hover information for the name in a floating window at the cursor.
 ---@param target float-claude.Target
 function M.hover(target)
@@ -166,6 +188,9 @@ function M.hover(target)
       border = not own_border and "rounded" or nil,
     })
     vim.wo[hover_win].winhighlight = ""
+    if vim.api.nvim_get_current_win() == win then -- not K again, focusing the hover
+      fit(hover_win)
+    end
   end)
 end
 

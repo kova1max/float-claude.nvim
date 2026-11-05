@@ -1204,7 +1204,8 @@ end)
 -- An LSP server in the child, attached to buffer 1 (named demo.lua): `defs`
 -- maps a name to its definition { line, character } (both 0-based) and
 -- answers textDocument/definition for the name at the given position; `symbols`
--- does the same for workspace/symbol. Hover shows "hover: <name>".
+-- does the same for workspace/symbol. Hover shows "hover: <name>" (or the
+-- lines of g:fake_hover).
 local function fake_lsp(defs, symbols)
   lua([[
     local defs, symbols = ...
@@ -1231,7 +1232,7 @@ local function fake_lsp(defs, symbols)
             local at = symbols[params.query]
             result = at and { { name = params.query, kind = 12, location = location(vim.uri_from_bufnr(1), at) } } or {}
           elseif method == "textDocument/hover" then
-            result = { contents = { kind = "markdown", value = "hover: " .. name } }
+            result = { contents = { kind = "markdown", value = table.concat(vim.g.fake_hover or { "hover: " .. name }, "\n") } }
           end
           vim.schedule(function() callback(nil, result) end)
           return true, id
@@ -1348,6 +1349,39 @@ test("answer: names resolve through LSP; <CR> or a click jumps to the definition
   wait("return vim.api.nvim_get_current_win() == 1000 and vim.api.nvim_win_get_cursor(0)[2] == 9", "the jump to f")
   eq({ 1, 9 }, lua("return vim.api.nvim_win_get_cursor(0)"), "at f's definition")
   eq("", lua("return vim.v.errmsg"), "no errors")
+end)
+
+test("answer: K shows all of a long hover, below the popup's top rows", function()
+  setup({ CODE_ANSWER })
+  fake_lsp({ nums = { 0, 11 } }, {})
+  lua([[vim.g.fake_hover = { "one", "", "two", "", "three", "", "four", "", "five", "", "six" }]])
+  ask()
+  keys("explain<CR>")
+  wait("return answered(1)", "the answer")
+  for _ = 1, 50 do
+    if vim.iter(transcript_hls()):any(function(h)
+      return h[3] == "FloatClaudeLink"
+    end) then
+      break
+    end
+    lua("vim.wait(20)")
+  end
+  keys("<C-\\><C-n><C-w>w")
+  lua("vim.api.nvim_win_set_cursor(0, { 4, 15 })") -- on nums
+  keys("K")
+  wait([[return vim.iter(vim.api.nvim_list_wins()):any(function(w)
+    return vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(w), 0, 1, false)[1] == "one"
+  end)]], "the hover window")
+  local shown = lua([[
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(w), 0, 1, false)[1] == "one" then
+        return { vim.api.nvim_win_get_height(w), vim.api.nvim_win_text_height(w, {}).all,
+          vim.fn.win_screenpos(w)[1] > vim.fn.screenpos(0, vim.fn.line("."), vim.fn.col(".")).row }
+      end
+    end
+  ]])
+  eq(shown[2], shown[1], "rows of the hover shown, of its text")
+  eq(true, shown[3], "below the cursor")
 end)
 
 test("edit: the tag may share its line with the code", function()
@@ -2454,6 +2488,55 @@ test("closing the popup ends the CLI process", function()
   local pid = vim.json.decode(vim.fn.readfile(log)[1]).pid
   keys("<Esc>q")
   wait("return vim.uv.kill(" .. pid .. ", 0) ~= 0", "the CLI process to end")
+end)
+
+-- The :checkhealth float-claude report.
+local function health()
+  return lua([[
+    vim.cmd("checkhealth float-claude")
+    local text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    vim.cmd.bwipeout()
+    return text
+  ]])
+end
+
+local function contains(text, part)
+  if not text:find(part, 1, true) then
+    error(string.format("expected %s in:\n%s", vim.inspect(part), text), 2)
+  end
+end
+
+test(":checkhealth float-claude: setup, the CLI, and keys another mapping took", function()
+  contains(health(), "setup() has not run")
+  setup()
+  lua([[vim.keymap.set("n", "<leader>an", "<Cmd>bnext<CR>", { desc = "next buffer" })]])
+  local text = health()
+  contains(text, "OK setup() has run")
+  -- The fake CLI is Neovim itself: `--version` prints its version.
+  contains(text, "OK " .. vim.v.progpath .. ": NVIM v")
+  contains(text, "<leader>an (next_chat_key) is mapped by something else: next buffer")
+  eq(nil, text:find("keymap) is mapped", 1, true), "the plugin's own keys are not reported")
+end)
+
+test(":help float-claude: the tags build and every link resolves", function()
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir .. "/doc", "p")
+  vim.fn.writefile(vim.fn.readfile(root .. "/doc/float-claude.txt"), dir .. "/doc/float-claude.txt")
+  local missing, file = unpack(lua([[
+    local dir = ...
+    vim.opt.rtp:prepend(dir)
+    vim.cmd.helptags(dir .. "/doc") -- fails on a duplicate tag
+    local missing = {}
+    for link in table.concat(vim.fn.readfile(dir .. "/doc/float-claude.txt"), "\n"):gmatch("|([^|%s]+)|") do
+      if not pcall(vim.cmd.help, link) then
+        table.insert(missing, link)
+      end
+    end
+    vim.cmd.help("float-claude")
+    return { missing, vim.fn.expand("%:t") }
+  ]], dir))
+  eq({}, missing, "links without a tag")
+  eq("float-claude.txt", file, ":help float-claude")
 end)
 
 if failures > 0 then
