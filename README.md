@@ -150,6 +150,8 @@ A chat you hide keeps going, and opening the popup on a new selection (or runnin
 - `<leader>al` (`:FloatClaudeChats`) picks one from a list, which also says which ones are still answering or have a reply you have not seen;
 - `<leader>ai` in Normal mode goes back to the chat shown last.
 
+One chat edits a file at a time. While a chat's edit is still writing into a file, or its diff there waits for review, an edit another chat replies with is not applied: Claude's reply stays in that chat as text, with a note such as `chat 1/2 has an edit pending on this file - accept or discard it first`, and Claude is told with the next message. Ask again once the other edit is over.
+
 `q` ends only the chat it is pressed in. Opening one more than `max_chats` ends the one used longest ago (it stays in the [history](#history)).
 
 ### History

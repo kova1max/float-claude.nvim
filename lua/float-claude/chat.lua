@@ -904,10 +904,23 @@ function M.open(opts)
     if not vim.api.nvim_buf_is_loaded(s.buf) then
       return fail("the buffer was unloaded")
     end
+    local ex = s.exchanges[#s.exchanges]
+    for i, c in ipairs(chats) do
+      local held = c ~= chat and c.holds(s.buf)
+      if held then -- one chat edits a buffer at a time: the reply stays an answer
+        ex.a = code
+        ex.notice = string.format(held == "pending" and "chat %d/%d has an edit pending on this file - accept or discard it first"
+          or "chat %d/%d is editing this file - ask again once it is done", i, #chats)
+        table.insert(s.log, string.format('- Your EDIT for "%s" was not applied: another chat was editing the file.', summary(ex.q)))
+        if ex.a ~= "" then
+          stop_spinner()
+        end
+        return layout()
+      end
+    end
     if not vim.bo[s.buf].modifiable then
       return fail("the buffer is not modifiable")
     end
-    local ex = s.exchanges[#s.exchanges]
     ex.edit = true
     sync_selection()
     note_hand_changes() -- made while Claude was replying; its edit's diff leaves them out
@@ -968,12 +981,12 @@ function M.open(opts)
       tag, rest = parse_tag(reply, true)
       if tag == "EDIT" then
         start_edit(rest)
-        if editing then
-          editing.finish()
+        if editing or closed then
+          return editing and editing.finish()
         end
-        return
+      else
+        ex.a = rest
       end
-      ex.a = rest
     end
     ex.a = vim.trim(ex.a)
     ex.done = true
@@ -1250,6 +1263,11 @@ function M.open(opts)
     end,
     hidden = function()
       return s.hidden
+    end,
+    -- "streaming" while its edit writes into `buf`, "pending" while its diff
+    -- there waits for review, else nil.
+    holds = function(buf)
+      return s.buf == buf and (reviewing and "pending" or editing and "streaming") or nil
     end,
     -- A reply is streaming (not an edit waiting for review).
     answering = function()

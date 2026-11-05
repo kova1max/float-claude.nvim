@@ -1833,6 +1833,50 @@ test("multiple chats: hidden ones stay independent; next/prev and the picker sho
   eq("  [No Name] · L12 · 1/2", shown_header(), "chat 1 (lines 2-6) ended")
 end)
 
+test("multiple chats: an edit while another chat's diff waits on the file is refused; the chat stays open", function()
+  local log = setup({ "EDIT\n  a()\n", "EDIT\n  b()\n" }, 0, { review_edits = true })
+  ask()
+  keys("one<CR>")
+  wait("return reviewing()", "chat 1's diff")
+  keys("<C-q>")
+  keys("8GVj ai")
+  keys("two<CR>")
+  wait("return answered(1)", "chat 2's reply")
+  eq({ "  ❯ two", "    a()", "", "  chat 1/2 has an edit pending on this file -", "  accept or discard it first", "" }, turns(),
+    "the reply stays as text, with a note")
+  eq({ 2, ORIGINAL }, { lua("return #require('float-claude.chat').list()"), buffer() }, "chat 2 open, nothing written")
+  keys("<Esc> ap")
+  eq({ "  [No Name] · L2–6 · 5 lines · 1/2", "float-claude-transcript" }, { shown_header(), lua("return vim.bo.filetype") },
+    "chat 1, at its diff")
+  keys(" yy")
+  eq("  a()", buffer()[2], "chat 1's edit accepted")
+  keys("<Esc> an")
+  keys("again<CR>")
+  wait("return reviewing()", "chat 2's diff")
+  keys(" yy")
+  eq({ "function f(nums)", "  a()", "end", "  b()", "-- 10" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 5, false)"),
+    "chat 2 edits its lines once the file is free")
+  assert(sent(log)[5]:find("was not applied: another chat was editing the file", 1, true), sent(log)[5])
+end)
+
+test("multiple chats: an edit while a hidden chat's edit streams into the file is refused", function()
+  setup({ "EDIT\n  a()\n  b()\n  c()\n" }, 300)
+  ask()
+  keys("one<CR>")
+  wait("return vim.api.nvim_buf_get_lines(1, 1, 2, false)[1] == '  a()'", "chat 1's first line")
+  keys("<C-q>")
+  keys("8GVj ai")
+  keys("two<CR>")
+  wait("return answered(1)", "chat 2's reply")
+  eq({ "  ❯ two", "    a()", "    b()", "    c()", "", "  chat 1/2 is editing this file - ask again once", "  it is done", "" },
+    turns(), "the reply stays as text, with a note")
+  wait("return not require('float-claude.chat').list()[1].answering()", "chat 1's edit")
+  eq({ "function f(nums)", "  a()", "  b()", "  c()", "end", "-- 8", "-- 9" }, buffer(), "only chat 1's edit written")
+  lua("vim.api.nvim_set_current_win(1000)")
+  keys("<Esc>u")
+  eq(ORIGINAL, buffer(), "one undo reverts it")
+end)
+
 test("status(): a spinner while a hidden chat answers, a dot for a reply not seen, redrawn only while busy", function()
   local long = {}
   for i = 1, 30 do
