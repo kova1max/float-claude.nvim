@@ -452,8 +452,11 @@ function M.open(opts)
       return
     end
     local cur = {}
-    for _, r in ipairs(s.ranges) do
-      table.insert(cur, ranges.read(s.buf, ns, r))
+    for i, r in ipairs(s.ranges) do
+      cur[i] = ranges.read(s.buf, ns, r)
+      if not cur[i] then
+        return
+      end
     end
     if #cur > 0 then
       s.cur, s.first, s.last = cur, cur[1].first, cur[#cur].last

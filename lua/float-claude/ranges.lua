@@ -146,18 +146,24 @@ end
 
 ---Where range `r` is now, as a spec { first, last, rows?, from? } (rows for
 ---a block); nil if its marks are gone. Lines all deleted: the line that took
----their place; a block's rows whose lines were deleted are gone.
+---their place (for a block, an empty row at its start); a block's rows whose
+---lines were deleted are gone.
 function M.read(buf, ns, r)
-  local marks = {}
+  local marks, any = {}, nil
   for k, id in ipairs(r.marks) do
     local m = vim.api.nvim_buf_get_extmark_by_id(buf, ns, id, { details = true })
     local line = r.lines[k] and vim.api.nvim_buf_get_extmark_by_id(buf, ns, r.lines[k], { details = true })
+    any = any or (m[1] and m)
     if m[1] and not (line and line[3].invalid) then
       table.insert(marks, m)
     end
   end
-  if #marks == 0 then
+  if not any then
     return nil
+  end
+  if #marks == 0 then
+    local lnum = math.min(any[1] + 1, vim.api.nvim_buf_line_count(buf))
+    return { first = lnum, last = lnum, rows = { { lnum, 0, 0 } }, from = r.from }
   end
   if not r.block then
     local row, end_row, end_col = marks[1][1], marks[1][3].end_row, marks[1][3].end_col
