@@ -196,7 +196,7 @@ local function message(s, prompt, followup, mentioned)
     return string.format("a block, a column range in %s (each line below is the selected part of one line of it, in order)",
       span(r.first, r.last - r.first + 1))
   end
-  if #s.cur == 1 then
+  if not s.multi then
     local r = s.cur[1]
     table.insert(out, r.rows and "Selected: " .. block(r) .. ":" or string.format("Selected lines %d-%d:", r.first, r.last))
     vim.list_extend(out, { "<selection>", table.concat(ranges.text(buf, r), "\n"), "</selection>" })
@@ -446,21 +446,36 @@ function M.open(opts)
     }, opts.history)
   end
 
-  -- Read the selected ranges back from their extmarks.
+  -- Read the selected ranges back from their extmarks (not while an edit
+  -- writes them or waits for review). A range whose lines were all deleted is
+  -- dropped, unless it is the last one left.
   local function sync_selection()
-    if not vim.api.nvim_buf_is_loaded(s.buf) then
+    if editing or reviewing or not vim.api.nvim_buf_is_loaded(s.buf) then
       return
     end
-    local cur = {}
+    local cur, kept, gone = {}, {}, {}
     for i, r in ipairs(s.ranges) do
-      cur[i] = ranges.read(s.buf, ns, r)
-      if not cur[i] then
+      local spec = ranges.read(s.buf, ns, r)
+      if not spec then
         return
       end
+      if spec.deleted and (#kept > 0 or i < #s.ranges) then
+        table.insert(gone, i)
+      else
+        table.insert(kept, r)
+        table.insert(cur, spec)
+      end
     end
-    if #cur > 0 then
-      s.cur, s.first, s.last = cur, cur[1].first, cur[#cur].last
+    if #gone > 0 then
+      for _, i in ipairs(gone) do
+        ranges.untrack(s.buf, ns, s.ranges[i])
+      end
+      local which = (#gone == 1 and "range " or "ranges ") .. table.concat(gone, ", ")
+      s.notice = which .. (#gone == 1 and " was deleted" or " were deleted")
+      table.insert(s.log, string.format("- I deleted the lines of %s; the ranges left are numbered anew below.", which))
+      s.ranges = kept
     end
+    s.cur, s.first, s.last = cur, cur[1].first, cur[#cur].last
   end
   sync_selection()
 
@@ -616,6 +631,12 @@ function M.open(opts)
         add("")
       end
     end
+    if s.notice then
+      for _, l in ipairs(answer.wrap(s.notice, width - 3)) do
+        add("  " .. l, "FloatClaudeHistory")
+      end
+      add("")
+    end
     if streaming() then
       add("")
     end
@@ -647,9 +668,7 @@ function M.open(opts)
     if closed then
       return
     end
-    if not editing then -- an edit sets the selection once it is over
-      sync_selection()
-    end
+    sync_selection()
     local width = math.max(math.min(opts.width, vim.o.columns), 1)
 
     local kept = not s.follow and vim.fn.line("w0", s.twin)
@@ -989,8 +1008,16 @@ function M.open(opts)
     if not vim.bo[s.buf].modifiable then
       return fail("the buffer is not modifiable")
     end
-    ex.edit = true
     sync_selection()
+    local a, b = ranges.overlap(s.cur)
+    if a then
+      ex.a = "```\n" .. code
+      ex.notice = string.format("ranges %d and %d now share lines, so the edit was not applied - select them again in a new chat", a, b)
+      table.insert(s.log, string.format('- Your EDIT for "%s" was not applied: ranges %d and %d share lines now.', summary(ex.q), a, b))
+      stop_spinner()
+      return layout()
+    end
+    ex.edit = true
     note_hand_changes() -- made while Claude was replying; its edit's diff leaves them out
     editing = edit.start({
       buf = s.buf,
@@ -1085,6 +1112,12 @@ function M.open(opts)
       return
     end
     sync_selection()
+    local a, b = ranges.overlap(s.cur)
+    if a then
+      s.notice = string.format("ranges %d and %d now share lines, so nothing was sent - select them again in a new chat", a, b)
+      return layout()
+    end
+    s.notice = nil
     note_hand_changes()
     local mentioned = opts.mentions and mentions.expand(text, s.buf, opts.mentions) or {}
     local msg = message(s, text, #s.exchanges > 0, mentioned)
