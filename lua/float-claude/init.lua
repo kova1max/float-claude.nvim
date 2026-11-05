@@ -490,6 +490,11 @@ function M.status()
   return require("float-claude.chat").status(config.status)
 end
 
+---The options in use: the defaults with setup()'s on top (for :checkhealth).
+function M.config()
+  return config
+end
+
 function M.setup(opts)
   opts = opts or {}
   -- Actions merge one by one, so one can be changed or removed alone.
