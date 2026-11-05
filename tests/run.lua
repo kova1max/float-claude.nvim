@@ -671,7 +671,7 @@ test("block edit: after all the block's lines are deleted by hand, the chat is a
   keys("again<CR>")
   wait("return answered(2)", "the answer")
   local msg = sent(log)[3]
-  assert(msg:find("Selected: nothing now - the selected code was deleted.\nRequest: again", 1, true), msg)
+  assert(msg:find("Selected: nothing now - the selected code is no longer tracked.\nRequest: again", 1, true), msg)
   assert(not msg:find("<selection>", 1, true), "the line that took its place is not sent")
   keys("fix it<CR>")
   wait("return answered(3)", "the reply")
@@ -691,7 +691,7 @@ test("lines replaced by a filter (:%!) count as deleted: the chat is ask-only", 
   eq({ "  the selected code was deleted - select again to", "  edit", "" }, vim.list_slice(turns(), #turns() - 2), "the note")
   keys("fix it<CR>")
   wait("return answered(2)", "the reply")
-  assert(sent(log)[3]:find("Selected: nothing now - the selected code was deleted.\nRequest: fix it", 1, true), sent(log)[3])
+  assert(sent(log)[3]:find("Selected: nothing now - the selected code is no longer tracked.\nRequest: fix it", 1, true), sent(log)[3])
   eq(vim.list_slice(ORIGINAL, 1, 7), lua("return vim.api.nvim_buf_get_lines(1, 0, 7, false)"), "no edit")
 end)
 
@@ -707,7 +707,7 @@ test("after the selected lines are deleted by hand, the chat is ask-only and an 
   keys("fix it<CR>")
   wait("return answered(2)", "the reply")
   local msg = sent(log)[3]
-  assert(msg:find("Selected: nothing now - the selected code was deleted.\nRequest: fix it", 1, true), msg)
+  assert(msg:find("Selected: nothing now - the selected code is no longer tracked.\nRequest: fix it", 1, true), msg)
   assert(not msg:find("<selection>", 1, true), "the line that took their place is not sent")
   eq({ "function f(nums)", "end", "-- 8", "-- 9" }, lua("return vim.api.nvim_buf_get_lines(1, 0, 4, false)"), "no edit")
 end)
@@ -794,7 +794,7 @@ test("ranges: a range whose lines are all deleted by hand is dropped with a note
   keys("go<CR>")
   wait("return answered(2)", "the edit")
   local s = sent(log)
-  assert(s[3]:find("- I deleted the lines of range 1; the ranges left are numbered anew below.", 1, true), s[3])
+  assert(s[3]:find("- Range 1 is no longer tracked; the ranges left are numbered anew below.", 1, true), s[3])
   assert(s[3]:find("Selected ranges (1), numbered in file order:\nRange 1: lines 8-9:\n<range 1>\n-- 10\n-- 11\n</range 1>\n", 1, true), s[3])
   eq({ "-- X", "-- Y", "-- Z", "-- 12" }, lua("return vim.api.nvim_buf_get_lines(1, 7, 11, false)"))
   keys("and now?<CR>")

@@ -198,7 +198,7 @@ local function message(s, prompt, followup, mentioned)
       span(r.first, r.last - r.first + 1))
   end
   if s.cur[1].deleted then
-    table.insert(out, "Selected: nothing now - the selected code was deleted.")
+    table.insert(out, "Selected: nothing now - the selected code is no longer tracked.")
   elseif not s.multi then
     local r = s.cur[1]
     table.insert(out, r.rows and "Selected: " .. block(r) .. ":" or string.format("Selected lines %d-%d:", r.first, r.last))
@@ -478,7 +478,8 @@ function M.open(opts)
       end
       local which = (#gone == 1 and "range " or "ranges ") .. table.concat(gone, ", ")
       s.notice = which .. (#gone == 1 and " was deleted" or " were deleted")
-      table.insert(s.log, string.format("- I deleted the lines of %s; the ranges left are numbered anew below.", which))
+      table.insert(s.log, string.format("- %s %s no longer tracked; the ranges left are numbered anew below.",
+        which:gsub("^r", "R"), #gone == 1 and "is" or "are"))
       s.ranges = kept
     end
     if #cur == 1 and cur[1].deleted then
