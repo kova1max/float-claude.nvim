@@ -138,10 +138,14 @@ function M.start(opts)
             return
           end
           pending = pending .. data
-          for line in pending:gmatch("([^\n]*)\n") do
-            handle(line)
+          -- Found with plain searches: a pattern anchored at the end would
+          -- rescan the whole chunk from every position.
+          local from = 1
+          for nl in pending:gmatch("()\n") do
+            handle(pending:sub(from, nl - 1))
+            from = nl + 1
           end
-          pending = pending:match("[^\n]*$")
+          pending = pending:sub(from)
         end)
       end
     end,
@@ -174,6 +178,9 @@ function M.start(opts)
     stop = function()
       if not stopped then
         stopped = true
+        -- Its input ends too: a CLI that does not die of the signal at once
+        -- still exits once its input is over.
+        pcall(proc.write, proc, nil)
         proc:kill("sigterm")
       end
     end,

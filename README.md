@@ -358,3 +358,9 @@ nvim --clean --headless -l tests/run.lua
 ```
 
 `ONLY=<text>` runs just the tests whose name contains the text.
+
+Measure what the plugin costs (setup time, what runs while idle, CPU per streamed piece of a reply on a 10,000-line file, the longest the editor is blocked, memory), with the same fake CLI and LSP server:
+
+```sh
+nvim --clean --headless -l tests/bench.lua
+```

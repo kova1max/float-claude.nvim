@@ -129,6 +129,20 @@ local function in_popup()
   return vim.startswith(vim.bo.filetype, "float-claude")
 end
 
+-- Color the popup with the configured theme, an open one too.
+local function restyle()
+  local theme_ns = require("float-claude.theme").apply(config.theme, config.colors)
+  if package.loaded["float-claude.chat"] then
+    require("float-claude.chat").restyle(theme_ns)
+  end
+end
+
+-- Whether the theme's colors were set: nothing shows them before.
+local function styled()
+  local theme = package.loaded["float-claude.theme"]
+  return theme ~= nil and theme.ns() ~= nil
+end
+
 -- The ranges to ask about: the pending ones of the current buffer with
 -- `spec` added, else `spec` alone (nil without either).
 local function gather(spec)
@@ -177,6 +191,9 @@ function M.add(range)
   local spec = selection(range) or { first = vim.fn.line("."), last = vim.fn.line(".") }
   if in_popup() then
     return util.error("select the range in the code")
+  end
+  if not styled() then -- the collected ranges show in its colors
+    restyle()
   end
   local ok, err = ranges.add(vim.api.nvim_get_current_buf(), spec)
   if not ok then
@@ -473,11 +490,6 @@ function M.status()
   return require("float-claude.chat").status(config.status)
 end
 
--- Color the popup with the configured theme, an open one too.
-local function restyle()
-  require("float-claude.chat").restyle(require("float-claude.theme").apply(config.theme, config.colors))
-end
-
 function M.setup(opts)
   opts = opts or {}
   -- Actions merge one by one, so one can be changed or removed alone.
@@ -557,22 +569,30 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("FloatClaude", function(cmd)
     M.palette(cmd.range > 0 and { cmd.line1, cmd.line2 } or nil)
   end, { range = true, desc = "float-claude: pick an action" })
-  restyle()
-  -- A new colorscheme clears the groups, and "auto" follows it.
+  -- The colors are set once something shows them; then a new colorscheme
+  -- clears them, and "auto" follows it.
+  if styled() then
+    restyle()
+  end
   vim.api.nvim_create_autocmd("ColorScheme", {
     group = group,
-    callback = restyle,
+    callback = function()
+      if styled() then
+        restyle()
+      end
+    end,
   })
-  for kind, values in pairs({ Model = require("float-claude.claude").models, Effort = require("float-claude.claude").efforts }) do
+  for _, kind in ipairs({ "Model", "Effort" }) do
     vim.api.nvim_create_user_command("FloatClaude" .. kind, function(cmd)
       M.switch(kind:lower(), cmd.args ~= "" and cmd.args or nil)
     end, {
       nargs = "?",
       desc = "float-claude: switch the chat's " .. kind:lower(),
       complete = function(lead)
+        local claude = require("float-claude.claude")
         return vim.tbl_filter(function(v)
           return vim.startswith(v, lead)
-        end, values)
+        end, kind == "Model" and claude.models or claude.efforts)
       end,
     })
   end

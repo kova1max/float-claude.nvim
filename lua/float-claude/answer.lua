@@ -194,7 +194,8 @@ end
 ---Lay out an answer in rows of `opts.width` cells. `lang` is the language of
 ---code without a fence tag; `done` says the answer is complete (otherwise
 ---its last line is still streaming, and has no names yet); `cache` keeps
----treesitter results across calls.
+---treesitter results and the rows of finished lines and code blocks across
+---calls (the rows it hands out again must not be changed).
 ---@param opts { width: integer, lang: string?, done: boolean, cache: table, tabstop: integer }
 ---@return float-claude.Row[]
 function M.render(text, opts)
@@ -228,9 +229,29 @@ function M.render(text, opts)
     end
   end
 
+  -- The rows a finished line or code block (lines i..j) had last time, else
+  -- nil and the key to keep the ones laid out now under.
+  local function laid_out(kind, i, j)
+    if opts.cache then
+      local key = table.concat({ kind, width, opts.tabstop, opts.lang or "", table.concat(lines, "\n", i, j) }, "\0")
+      local cached = opts.cache[key]
+      if cached then
+        vim.list_extend(rows, cached)
+        return true
+      end
+      return false, key
+    end
+  end
+  local function keep(key, start)
+    if key then
+      opts.cache[key] = vim.list_slice(rows, start + 1)
+    end
+  end
+
   local i = 1
   while i <= #lines do
     local indent, fence, tag = lines[i]:match("^(%s*)(```+)%s*([^`%s]*)")
+    local start = #rows
     if fence then
       -- A code block, to a closing fence or the end.
       local code, j = {}, i + 1
@@ -239,30 +260,44 @@ function M.render(text, opts)
         table.insert(code, util.expand_tabs(l:sub(1, #indent) == indent and l:sub(#indent + 1) or l, opts.tabstop))
         j = j + 1
       end
-      local lang = tag ~= "" and (vim.treesitter.language.get_lang(tag) or tag) or opts.lang
       local complete = j <= #lines or opts.done
-      local caps = lang and captures(table.concat(code, "\n"), lang, complete and opts.cache) or {}
-      for k, l in ipairs(code) do
-        local ranges = {}
-        highlights(caps[k - 1], lang, 0, ranges)
-        emit(cut_line(l, width), ranges, finished(i + k) and names(l, caps[k - 1]) or {})
+      local hit, key
+      if complete then
+        hit, key = laid_out("block", i, math.min(j, #lines))
+      end
+      if not hit then
+        local lang = tag ~= "" and (vim.treesitter.language.get_lang(tag) or tag) or opts.lang
+        local caps = lang and captures(table.concat(code, "\n"), lang, complete and opts.cache) or {}
+        for k, l in ipairs(code) do
+          local ranges = {}
+          highlights(caps[k - 1], lang, 0, ranges)
+          emit(cut_line(l, width), ranges, finished(i + k) and names(l, caps[k - 1]) or {})
+        end
+        keep(key, start)
       end
       i = j + 1
     else
-      local line, code_spans = spans(lines[i], not finished(i))
-      local ranges, found = {}, {}
-      for _, span in ipairs(code_spans) do
-        local from, to, code = unpack(span)
-        table.insert(ranges, { from, to, "FloatClaudeCode", 90 })
-        local caps = opts.lang and captures(code, opts.lang, finished(i) and opts.cache)[0]
-        highlights(caps, opts.lang, from, ranges)
-        if finished(i) then
-          for _, n in ipairs(names(code, caps)) do
-            table.insert(found, { from + n[1], from + n[2], n[3], n[4] })
+      local hit, key
+      if finished(i) then
+        hit, key = laid_out("line", i, i)
+      end
+      if not hit then
+        local line, code_spans = spans(lines[i], not finished(i))
+        local ranges, found = {}, {}
+        for _, span in ipairs(code_spans) do
+          local from, to, code = unpack(span)
+          table.insert(ranges, { from, to, "FloatClaudeCode", 90 })
+          local caps = opts.lang and captures(code, opts.lang, finished(i) and opts.cache)[0]
+          highlights(caps, opts.lang, from, ranges)
+          if finished(i) then
+            for _, n in ipairs(names(code, caps)) do
+              table.insert(found, { from + n[1], from + n[2], n[3], n[4] })
+            end
           end
         end
+        emit(wrap_line(line, width), ranges, found)
+        keep(key, start)
       end
-      emit(wrap_line(line, width), ranges, found)
       i = i + 1
     end
   end

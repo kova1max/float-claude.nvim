@@ -33,14 +33,27 @@ function M.list()
 end
 
 ---Save `chat`, replacing its earlier save, then delete the chats beyond
----`retention` ({ max = count, days = age }; either may be false).
+---`retention` ({ max = count, days = age }; either may be false). A chat's
+---age is its file's: it is written when saved.
 function M.save(chat, retention)
   vim.fn.mkdir(dir(), "p")
-  vim.fn.writefile({ vim.json.encode(chat) }, path(chat.id))
+  -- Without an fsync, which can take milliseconds; a chat is saved after each reply.
+  vim.fn.writefile({ vim.json.encode(chat) }, path(chat.id), "S")
+  -- From the files' times: reading every saved chat would take long.
+  local files = {}
+  for name, kind in vim.fs.dir(dir()) do
+    local stat = kind == "file" and name:match("%.json$") and vim.uv.fs_stat(vim.fs.joinpath(dir(), name))
+    if stat then
+      table.insert(files, { name = name, time = stat.mtime.sec + stat.mtime.nsec / 1e9 })
+    end
+  end
+  table.sort(files, function(a, b)
+    return a.time > b.time
+  end)
   local cutoff = retention.days and os.time() - retention.days * 86400
-  for i, saved in ipairs(M.list()) do
-    if (retention.max and i > retention.max) or (cutoff and saved.time < cutoff) then
-      os.remove(path(saved.id))
+  for i, file in ipairs(files) do
+    if (retention.max and i > retention.max) or (cutoff and file.time < cutoff) then
+      os.remove(vim.fs.joinpath(dir(), file.name))
     end
   end
 end

@@ -1741,6 +1741,31 @@ test("close_after_edit closes once the edit is applied; close_on_leave closes wh
   wait("return #vim.api.nvim_list_wins() == 1", "the popup to close")
 end)
 
+test("answer: a name on the last line, already resolved, is underlined once the reply ends", function()
+  setup({ CODE_ANSWER, "ANSWER\nuse `nums` here." }, 80)
+  fake_lsp({ nums = { 0, 11 } }, {})
+  ask()
+  keys("explain<CR>")
+  wait("return answered(1)", "the first answer")
+  local function linked(row)
+    return vim.iter(transcript_hls()):any(function(h)
+      return vim.deep_equal(h, { row, "nums", "FloatClaudeLink" })
+    end)
+  end
+  for _ = 1, 50 do
+    if linked(4) then
+      break
+    end
+    lua("vim.wait(20)")
+  end
+  assert(linked(4), "nums resolved in the first answer")
+  keys("more<CR>")
+  wait("return answered(2)", "the second answer")
+  local row = vim.fn.index(turns(), "    use nums here.") + 3
+  assert(row > 2, "the last line: " .. vim.inspect(turns()))
+  assert(linked(row), "nums underlined on the last line: " .. vim.inspect(transcript_hls()))
+end)
+
 test("close_on_leave: focusing the hover window (K twice) keeps the popup", function()
   setup({ CODE_ANSWER }, 0, { close_on_leave = true })
   fake_lsp({ nums = { 0, 11 } }, {})
@@ -1748,10 +1773,10 @@ test("close_on_leave: focusing the hover window (K twice) keeps the popup", func
   keys("explain<CR>")
   wait("return answered(1)", "the answer")
   keys("<C-\\><C-n><C-w>w")
-  lua("vim.api.nvim_win_set_cursor(0, { 4, 15 })") -- on nums
   wait([[return vim.iter(vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, { details = true })):any(function(m)
     return m[4].hl_group == "FloatClaudeLink" and m[2] == 3
   end)]], "nums to be underlined")
+  lua("vim.api.nvim_win_set_cursor(0, { 4, 15 })") -- on nums
   keys("K")
   wait([[return vim.iter(vim.api.nvim_list_wins()):any(function(w)
     return vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(w), 0, -1, false)[1] == "hover: nums"
@@ -2373,16 +2398,62 @@ end)
 
 test("history: retention keeps the latest max chats, none older than days", function()
   setup()
-  eq({ { "c", "b", "a" }, { "d", "c" } }, lua([[
+  eq({ { "c", "b", "a" }, { "d", "c", "b" }, { "e", "d" } }, lua([[
     local h = require("float-claude.history")
     local function ids() return vim.tbl_map(function(c) return c.id end, h.list()) end
-    h.save({ id = "a", time = os.time() - 40 * 86400 }, {})
+    local old = os.time() - 40 * 86400
+    h.save({ id = "a", time = old }, {})
+    vim.uv.fs_utime(vim.fn.stdpath("state") .. "/float-claude/a.json", old, old) -- saved then
     h.save({ id = "b", time = os.time() - 2 }, {})
     h.save({ id = "c", time = os.time() - 1 }, {})
     local kept = ids()
-    h.save({ id = "d", time = os.time() }, { max = 2, days = 30 })
-    return { kept, ids() }
+    h.save({ id = "d", time = os.time() }, { max = 10, days = 30 })
+    local recent = ids()
+    h.save({ id = "e", time = os.time() + 1 }, { max = 2, days = 30 })
+    return { kept, recent, ids() }
   ]]))
+end)
+
+test("setup() loads only the plugin's first module; the others load once used", function()
+  setup()
+  eq({ "float-claude" }, lua([[
+    local out = vim.tbl_filter(function(name) return name:match("^float%-claude") end, vim.tbl_keys(package.loaded))
+    return out
+  ]]))
+end)
+
+test("while a reply streams, the conversation above it is not written again", function()
+  setup({ "ANSWER\nfirst", "ANSWER\nsecond", { "ANSWER\n", "one\n", "two\n", "three" } }, 100)
+  ask()
+  keys("a<CR>")
+  wait("return answered(1)")
+  keys("b<CR>")
+  wait("return answered(2)")
+  lua([[
+    _G.first_changed = math.huge
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.bo[b].filetype == "float-claude-transcript" then
+        vim.api.nvim_buf_attach(b, false, { on_lines = function(_, _, _, first)
+          _G.first_changed = math.min(_G.first_changed, first)
+        end })
+      end
+    end
+  ]])
+  keys("c<CR>")
+  wait("return answered(3)")
+  eq("  ❯ c", turns()[7], "the third question")
+  -- Rows: padding, header, then the turns; the third question is row 8 (0-based).
+  eq(8, lua("return _G.first_changed"), "the first row written")
+end)
+
+test("closing the popup ends the CLI process", function()
+  local log = setup({ "ANSWER\nok" })
+  ask()
+  keys("hi<CR>")
+  wait("return answered(1)")
+  local pid = vim.json.decode(vim.fn.readfile(log)[1]).pid
+  keys("<Esc>q")
+  wait("return vim.uv.kill(" .. pid .. ", 0) ~= 0", "the CLI process to end")
 end)
 
 if failures > 0 then
