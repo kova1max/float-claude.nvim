@@ -22,9 +22,20 @@ local PREFIX = 4 -- "  ❯ " / "    " before every text line: 2 columns of paddi
 local SPINNER = { "◐", "◓", "◑", "◒" }
 local DELETED = "the selected code was deleted - select again to edit"
 local SPIN_MS = 130 -- a spinner's frame time
+local FRAME_MS = 30 -- a streaming reply is drawn at most this often
 local DIFF_CONTEXT = 2 -- unchanged lines around each change in the diffs sent
 
 local status_timer -- redraws the statuslines while a hidden chat is answering
+
+-- Quitting Neovim ends the chats' CLI processes, also one still replying.
+vim.api.nvim_create_autocmd("VimLeavePre", {
+  group = vim.api.nvim_create_augroup("float-claude-chats", {}),
+  callback = function()
+    for _, c in ipairs(chats) do
+      c.stop()
+    end
+  end,
+})
 
 -- Redraw the statuslines (see M.status) now, and keep doing so while a hidden
 -- chat is answering.
@@ -104,10 +115,25 @@ end
 -- "" if they are the same. Given `wins` ({ from, to } spans), only the hunks
 -- touching those lines of `new` are kept; the second result counts the others.
 local function unified(old, new, wins)
-  local text = util.diff(table.concat(old, "\n") .. "\n", table.concat(new, "\n") .. "\n", { ctxlen = DIFF_CONTEXT })
+  -- Only the lines between those both start and end with are compared (with
+  -- 50 more around them, so that the diff places its hunks as it would on the
+  -- whole file): in a long file, the few changed lines are found fast.
+  local head, tail = 0, 0
+  while head < #old and head < #new and old[head + 1] == new[head + 1] do
+    head = head + 1
+  end
+  while tail < #old - head and tail < #new - head and old[#old - tail] == new[#new - tail] do
+    tail = tail + 1
+  end
+  head, tail = math.max(head - 50, 0), math.max(tail - 50, 0)
+  local text = util.diff(table.concat(old, "\n", head + 1, #old - tail) .. "\n",
+    table.concat(new, "\n", head + 1, #new - tail) .. "\n", { ctxlen = DIFF_CONTEXT })
   local hunks = {}
   for line in text:gmatch("[^\n]*\n") do
     if line:match("^@@") then
+      line = line:gsub("^@@ %-(%d+)(,?%d*) %+(%d+)(,?%d*) @@", function(a, a_count, b, b_count)
+        return string.format("@@ -%d%s +%d%s @@", a + head, a_count, b + head, b_count)
+      end)
       table.insert(hunks, { line })
     else
       table.insert(hunks[#hunks], line)
@@ -499,6 +525,10 @@ function M.open(opts)
   -- The user's own changes since s.known (near the selection) go into the log
   -- as a diff; Claude knows the code as it is now then.
   local function note_hand_changes()
+    if s.known and vim.api.nvim_buf_get_changedtick(s.buf) == s.known_tick then
+      return -- not changed since: no need to read and compare the whole buffer
+    end
+    s.known_tick = vim.api.nvim_buf_get_changedtick(s.buf)
     local now = vim.api.nvim_buf_get_lines(s.buf, 0, -1, false)
     if s.known then
       local d, skipped = unified(s.known, now, windows(s))
@@ -594,13 +624,20 @@ function M.open(opts)
     end
     -- An answer's rows: code highlighted, names that resolve through LSP underlined.
     local function add_answer(ex, text_width)
-      local rows = answer.render(ex.a, {
-        width = text_width,
-        lang = s.lang,
-        done = ex.done,
-        cache = s.ts_cache,
-        tabstop = vim.bo[s.buf].tabstop,
-      })
+      local tabstop = vim.bo[s.buf].tabstop
+      -- A finished answer is laid out once per width.
+      local rows = ex.done and ex.rendered and ex.rendered.width == text_width and ex.rendered.tabstop == tabstop
+        and ex.rendered.rows
+        or answer.render(ex.a, {
+          width = text_width,
+          lang = s.lang,
+          done = ex.done,
+          cache = s.ts_cache,
+          tabstop = tabstop,
+        })
+      if ex.done then
+        ex.rendered = { width = text_width, tabstop = tabstop, rows = rows }
+      end
       for _, row in ipairs(rows) do
         add("    " .. row.text)
         for _, hl in ipairs(row.hls) do
@@ -690,18 +727,30 @@ function M.open(opts)
 
     local kept = not s.follow and vim.fn.line("w0", s.twin)
     local tlines, hls = transcript(width)
+    -- Only the rows from the first changed one on are written again, those of
+    -- a reply still streaming always (its code's highlights can change).
+    local from, drawn, ex = 0, s.drawn or {}, s.exchanges[#s.exchanges]
+    while from < #tlines and tlines[from + 1] == drawn[from + 1] do
+      from = from + 1
+    end
+    if ex and not ex.done then
+      from = math.min(from, ex.line - 1)
+    end
+    s.drawn = tlines
     vim.bo[s.tbuf].modifiable = true
-    vim.api.nvim_buf_set_lines(s.tbuf, 0, -1, false, tlines)
+    vim.api.nvim_buf_set_lines(s.tbuf, from, -1, false, vim.list_slice(tlines, from + 1))
     vim.bo[s.tbuf].modifiable = false
-    vim.api.nvim_buf_clear_namespace(s.tbuf, ns, 0, -1)
+    vim.api.nvim_buf_clear_namespace(s.tbuf, ns, from, -1)
     for _, hl in ipairs(hls) do
-      vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], hl[3] or 0, {
-        end_col = hl[4] or #tlines[hl[1] + 1],
-        hl_group = hl[2],
-        priority = hl[5],
-      })
-      if tlines[hl[1] + 1]:sub(1, 5) == "  ❯" then
-        vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], 2, { end_col = 5, hl_group = "FloatClaudePrompt", priority = 5000 })
+      if hl[1] >= from then
+        vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], hl[3] or 0, {
+          end_col = hl[4] or #tlines[hl[1] + 1],
+          hl_group = hl[2],
+          priority = hl[5],
+        })
+        if tlines[hl[1] + 1]:sub(1, 5) == "  ❯" then
+          vim.api.nvim_buf_set_extmark(s.tbuf, ns, hl[1], 2, { end_col = 5, hl_group = "FloatClaudePrompt", priority = 5000 })
+        end
       end
     end
 
@@ -819,7 +868,21 @@ function M.open(opts)
       follow_view()
     end
   end
-  s.resolve = lsp.resolver(s, layout) -- a name found: redraw to underline it
+  -- While a reply streams in, or names resolve, it is drawn once a frame.
+  local frame_timer
+  local function layout_soon()
+    if not frame_timer then
+      frame_timer = vim.defer_fn(function()
+        frame_timer = nil
+        layout()
+      end, FRAME_MS)
+    end
+  end
+  -- A name found: redraw all rows to underline it.
+  s.resolve = lsp.resolver(s, function()
+    s.drawn = nil
+    layout_soon()
+  end)
 
   local function stop_spinner()
     if spin_timer then
@@ -974,7 +1037,7 @@ function M.open(opts)
         or { request = summary(ex.q), first = s.first, old = result.old, new = result.new })
       table.insert(s.log, string.format('- Your EDIT for "%s" (edit #%d) was %s:\n<diff>\n%s</diff>', summary(ex.q), #s.edits,
         opts.review_edits and "accepted and applied" or "applied as is", unified(s.known, now)))
-      s.known = now
+      s.known, s.known_tick = now, vim.api.nvim_buf_get_changedtick(s.buf)
       -- Follow-ups work on the new lines: a range of lines it changed is the
       -- lines that took its place (a block's marks follow its new parts).
       for _, r in ipairs(result.ranges) do
@@ -1041,6 +1104,7 @@ function M.open(opts)
       return layout()
     end
     ex.edit = true
+    stop_spinner() -- the edit shows its own, in the code
     note_hand_changes() -- made while Claude was replying; its edit's diff leaves them out
     editing = edit.start({
       buf = s.buf,
@@ -1095,7 +1159,7 @@ function M.open(opts)
     if ex.a ~= "" then
       stop_spinner()
     end
-    layout()
+    layout_soon()
   end
 
   local function on_done()
@@ -1392,6 +1456,12 @@ function M.open(opts)
     used = 0, -- when last opened or shown (see `uses`)
     focus = enter,
     close = close,
+    -- End its CLI process, as Neovim quits.
+    stop = function()
+      if proc then
+        proc.stop()
+      end
+    end,
     send = send,
     layout = layout,
     hide = function()

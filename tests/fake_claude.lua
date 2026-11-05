@@ -7,11 +7,11 @@
 -- turn starts with an init event naming the session ("fake-session", or the
 -- one resumed) and $FAKE_CLAUDE_MODEL, if set. `--resume gone` fails as the
 -- CLI does for a session it cannot find. Received messages are appended to
--- $FAKE_CLAUDE_LOG.
+-- $FAKE_CLAUDE_LOG, after a line with its arguments and process id.
 local replies = vim.json.decode(os.getenv("FAKE_CLAUDE_REPLIES"))
 local delay = tonumber(os.getenv("FAKE_CLAUDE_DELAY") or "0")
 local log = io.open(os.getenv("FAKE_CLAUDE_LOG"), "a")
-log:write(vim.json.encode({ argv = arg }), "\n")
+log:write(vim.json.encode({ argv = arg, pid = vim.fn.getpid() }), "\n")
 log:flush()
 
 local function emit(event)

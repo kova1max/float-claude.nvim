@@ -20,13 +20,17 @@ local function client_for(buf, method)
   return vim.lsp.get_clients({ bufnr = buf, method = method })[1]
 end
 
--- The first line of `lines` in `order` that has `text` as whole words: 0-based row and byte column.
-local function occurrence(lines, order, text)
+-- The first line of `lines` that has `text` as whole words, lines first..last
+-- first: 0-based row and byte column.
+local function occurrence(lines, first, last, text)
   local pattern = "%f[%w_]" .. vim.pesc(text) .. "%f[^%w_]"
-  for _, r in ipairs(order) do
-    local col = lines[r] and lines[r]:find(pattern)
-    if col then
-      return r - 1, col - 1
+  for _, span in ipairs({ { first, last }, { 1, #lines } }) do
+    for r = span[1], math.min(span[2], #lines) do
+      -- A plain search first: much faster on the many lines without it.
+      local col = lines[r]:find(text, 1, true) and lines[r]:find(pattern)
+      if col then
+        return r - 1, col - 1
+      end
     end
   end
 end
@@ -43,6 +47,8 @@ end
 ---@return fun(name: string, chain: string): float-claude.Target? lookup the name's target, once found
 function M.resolver(s, on_resolved)
   local found = {} -- chain .. name: the target; false while looking or when not found
+  local queue = {} -- names to look up, one per turn of the main loop
+  local lines, tick -- the buffer's lines, as of its changedtick `tick`
 
   local function workspace_symbol(name, done)
     local client = client_for(s.buf, "workspace/symbol")
@@ -62,19 +68,17 @@ function M.resolver(s, on_resolved)
 
   local function resolve(name, chain, done)
     local client = client_for(s.buf, "textDocument/definition")
-    local lines = vim.api.nvim_buf_get_lines(s.buf, 0, -1, false)
-    local order = {}
-    for r = s.first, s.last do
-      table.insert(order, r)
+    if not vim.api.nvim_buf_is_loaded(s.buf) then
+      return done(nil)
     end
-    for r = 1, #lines do
-      table.insert(order, r)
+    if tick ~= vim.api.nvim_buf_get_changedtick(s.buf) then
+      lines, tick = vim.api.nvim_buf_get_lines(s.buf, 0, -1, false), vim.api.nvim_buf_get_changedtick(s.buf)
     end
-    local row, col = occurrence(lines, order, chain .. name)
+    local row, col = occurrence(lines, s.first, s.last, chain .. name)
     if row then
       col = col + #chain
     elseif chain ~= "" then
-      row, col = occurrence(lines, order, name)
+      row, col = occurrence(lines, s.first, s.last, name)
     end
     if not (client and row) then
       return workspace_symbol(name, done)
@@ -92,6 +96,21 @@ function M.resolver(s, on_resolved)
     end, s.buf)
   end
 
+  -- Look up the first queued name, then the next one on the next turn (a
+  -- timer: what vim.schedule() queues runs before Neovim reads keys again).
+  local function next_name()
+    local name, chain, key = unpack(table.remove(queue, 1))
+    resolve(name, chain, function(target)
+      found[key] = target or false
+      if target then
+        on_resolved()
+      end
+    end)
+    if #queue > 0 then
+      vim.defer_fn(next_name, 0)
+    end
+  end
+
   return function(name, chain)
     local key = chain .. name
     if found[key] == nil then
@@ -99,12 +118,11 @@ function M.resolver(s, on_resolved)
         return nil -- no LSP (yet): look again next time
       end
       found[key] = false
-      resolve(name, chain, function(target)
-        found[key] = target or false
-        if target then
-          vim.schedule(on_resolved) -- not while the caller is still drawing
-        end
-      end)
+      -- Looked up later, one name a turn, so drawing and typing never wait for it.
+      table.insert(queue, { name, chain, key })
+      if #queue == 1 then
+        vim.defer_fn(next_name, 0)
+      end
     end
     return found[key] or nil
   end
