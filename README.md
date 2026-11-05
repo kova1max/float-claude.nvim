@@ -54,6 +54,8 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `@` | Popup | Mention a file, an open buffer or `@diagnostics` to send it too, with completion (see [Mentions](#mentions)) |
 | `:FloatClaude` | Normal, Visual | Pick an action, open or hide the popup, or switch its theme, model or effort from a list |
 | `:FloatClaudeModel`, `:FloatClaudeEffort` | Anywhere | Switch the open chat's model or effort (see [Model and effort](#model-and-effort)) |
+| `<leader>an` / `<leader>ap`, `<leader>al` | Normal | Show the next / previous open chat, or pick one from a list (see [Several chats](#several-chats)) |
+| `<leader>aH` | Normal | Reopen a saved chat, also after restarting Neovim (see [History](#history)) |
 
 Every key above is a setup option (see [Configuration](#configuration)).
 
@@ -68,7 +70,7 @@ The popup does not have to be in the way, and does not have to go away:
 - `<C-q>` hides it and puts you back in the code. The conversation goes on: an answer keeps streaming and an edit keeps writing while it is hidden.
 - `<C-o>` (or leaving it any other way: another window, a split, another file) puts you back in the code with the popup still on screen, on top of whatever is shown there. It stays where it opened (top-right, or at the cursor it opened at) and answers keep streaming into it.
 
-`<leader>ai` in Normal mode brings you back into it, showing it first if hidden, with the same conversation and scroll position. A new Visual selection with `<leader>ai` starts a fresh chat in its place. `q` in the popup (Normal mode; `<Esc>` first if you are typing) or `:q` in it closes it and ends the conversation. Prefer the popup to go away on its own? See `close_after_edit` and `close_on_leave` below. Files never open inside the popup; `:e` there is refused.
+`<leader>ai` in Normal mode brings you back into it, showing it first if hidden, with the same conversation and scroll position. A new Visual selection with `<leader>ai` starts another chat, and the open one waits hidden (see [Several chats](#several-chats)). `q` in the popup (Normal mode; `<Esc>` first if you are typing) or `:q` in it closes it and ends the conversation. Prefer the popup to go away on its own? See `close_after_edit` and `close_on_leave` below. Files never open inside the popup; `:e` there is refused.
 
 ### Actions
 
@@ -86,7 +88,7 @@ One key sends a ready-made prompt: the popup opens and the prompt goes out right
 | `<leader>ah` | shorten | Shorten this text; keep its meaning. (prose) |
 | `<leader>ag` | grammar | Fix the spelling, grammar and punctuation of this text. Change nothing else. (prose) |
 
-In Visual mode an action works on the selected lines. In Normal mode it picks the lines for you and highlights them, so you see what Claude got: for a code action, the function around the cursor (found with treesitter; without a parser, or outside a function, the current line); for a prose action, the paragraph around the cursor in a prose buffer, or the block of comment lines around it in code. In the popup an action is a follow-up about the same lines, and outside it an action always starts a fresh chat in place of an open one.
+In Visual mode an action works on the selected lines. In Normal mode it picks the lines for you and highlights them, so you see what Claude got: for a code action, the function around the cursor (found with treesitter; without a parser, or outside a function, the current line); for a prose action, the paragraph around the cursor in a prose buffer, or the block of comment lines around it in code. In the popup an action is a follow-up about the same lines, and outside it an action always starts another chat (an open one waits hidden).
 
 Prose works like code: the reply is an answer, or an edit that replaces the text in place (one `u`, or a diff with `review_edits`). Buffers whose filetype is in `prose_filetypes` (Markdown, commit messages, plain text) offer the prose actions instead of the code ones; in code, the prose actions work on comments (a selection of comment lines only). An action where it is not offered says so and does nothing.
 
@@ -105,7 +107,7 @@ opts = {
 
 An action is `{ key, prompt }` (`key = false`: no mapping, still in `:FloatClaude`), plus `prose = true` to offer it for prose and comments instead of code, or `filetypes = { ... }` to offer it only in those filetypes: its key is then mapped only in buffers of those filetypes (and in the popup of a chat about one), and `:FloatClaude` lists it only there.
 
-`:FloatClaude` lists the actions offered for the current buffer with their keys, plus opening the popup (or going back to the open one), hiding it, switching its theme, and with a chat open, switching its model and effort, through `vim.ui.select` (so a picker plugin that replaces it, like telescope or snacks, shows it). From Visual mode (`:'<,'>FloatClaude`) the pick works on the selection; otherwise it does what its key does in Normal mode.
+`:FloatClaude` lists the actions offered for the current buffer with their keys, plus opening the popup (or going back to the open one), hiding it, switching its theme, reopening a saved chat, with a chat open switching its model and effort, and with several open going to another, through `vim.ui.select` (so a picker plugin that replaces it, like telescope or snacks, shows it). From Visual mode (`:'<,'>FloatClaude`) the pick works on the selection; otherwise it does what its key does in Normal mode.
 
 ### Mentions
 
@@ -136,6 +138,44 @@ Each chat starts with the `model` and `effort` from setup (by default the CLI's 
 
 `:FloatClaudeModel <model>` switches the open chat's model (`opus`, `sonnet`, `haiku`, `fable`, or any model name the CLI takes; with completion), and `:FloatClaudeEffort <level>` its effort (`low`, `medium`, `high`, `xhigh`, `max`). Without an argument, or from `:FloatClaude`, they offer a list. The switch applies from the next message and the conversation goes on: the running `claude` process is told to switch, so nothing restarts and nothing is lost. A model the CLI refuses shows an error and the chat keeps its model. The next chat starts with the setup values again. Without a `model` set, the header shows the model the CLI reports once the first reply starts.
 
+### Several chats
+
+A chat you hide keeps going, and opening the popup on a new selection (or running an action outside the popup) starts another chat instead of ending it: the one on screen is hidden, so up to `max_chats` (5) chats live side by side, one per selection. Each stays bound to its own lines, which it follows through your edits, and has its own conversation and `claude` process. One chat is on screen at a time; only its lines are highlighted. With more than one open, the header says which one it is:
+
+```
+  demo.lua · L11–13 · 3 lines · 2/3
+```
+
+- `<leader>an` / `<leader>ap` (`:FloatClaudeNext` / `:FloatClaudePrev`) show and focus the next / previous chat, wrapping around;
+- `<leader>al` (`:FloatClaudeChats`) picks one from a list, which also says which ones are still answering or have a reply you have not seen;
+- `<leader>ai` in Normal mode goes back to the chat shown last.
+
+`q` ends only the chat it is pressed in. Opening one more than `max_chats` ends the one used longest ago (it stays in the [history](#history)).
+
+### History
+
+Each chat about a file is saved once a reply ends: its file and lines, the conversation, Claude's edits, the model and effort, and the CLI's session id. `<leader>aH` (`:FloatClaudeHistory`, or `history` in `:FloatClaude`) lists the saved chats about the current file or any file under the current directory, latest first:
+
+```
+lua/demo.lua · L2–6 · 3h ago · what's the time complexity?
+```
+
+Picking one opens its file and reopens the chat on the same lines (kept within the file, which may have changed since), with the conversation as it was, also after restarting Neovim. The `claude` process resumes the chat's session (`claude --resume`), so Claude remembers it, and the next message sends the code as it is now. If the session cannot be resumed (e.g. you deleted it), the popup says so and the next message sends the conversation so far as text instead, so Claude still knows what was said. A chat that is still open is just shown.
+
+Chats are saved under `stdpath("state")/float-claude` (e.g. `~/.local/state/nvim/float-claude`), one JSON file each; the latest 100 are kept, none older than 30 days (`history = { max = 100, days = 30 }`, either can be `false`). For the sessions to resume, the `claude` CLI saves them too, as it does for any session, so they also show in `claude --resume` in that directory. `history = false` saves nothing, and the CLI then saves no sessions either.
+
+### Statusline
+
+`require("float-claude").status()` returns a spinner while a hidden chat is answering, `●` when one has a reply you have not seen yet (until you show it), and `""` otherwise, so the statusline tells you when to come back. While a hidden chat answers, the plugin redraws the statuslines a few times a second for the spinner; otherwise it redraws only when the status changes. With [lualine](https://github.com/nvim-lualine/lualine.nvim):
+
+```lua
+sections = {
+  lualine_x = { function() return require("float-claude").status() end, "filetype" },
+}
+```
+
+Or in a plain `statusline`: `vim.o.statusline = "%f %= %{v:lua.require'float-claude'.status()} "`. The icons are the `status` option.
+
 ### Code in answers
 
 Answers put names from the code in `inline code` and snippets in fenced code blocks. The popup shows them without the backticks and fences: inline code on a slightly lighter background, and both syntax-highlighted with treesitter in the file's language (or the language a fence names). Without a treesitter parser for the language the code stays plain; Neovim ships parsers for Lua, Vim script, C, Markdown and a few more, and others (JavaScript, TypeScript, ...) come from e.g. [nvim-treesitter](https://github.com/nvim-treesitter/nvim-treesitter). A code line too long for the popup is cut onto the next row.
@@ -153,7 +193,7 @@ The popup stays open either way, so you can keep asking. Hiding or leaving the p
 
 ### What Claude sees
 
-Claude gets the file name and filetype, the selected lines, up to 40 lines around them (`context_lines`), and the diagnostics in the selected lines (errors, warnings, ... from LSP or a linter, with their line, severity, message and source; `diagnostics = false` leaves them out), plus whatever the message mentions with `@`. Each follow-up sends the diagnostics as they are then, so after an edit Claude sees whether the errors went away. Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends.
+Claude gets the file name and filetype, the selected lines, up to 40 lines around them (`context_lines`), and the diagnostics in the selected lines (errors, warnings, ... from LSP or a linter, with their line, severity, message and source; `diagnostics = false` leaves them out), plus whatever the message mentions with `@`. Each follow-up sends the diagnostics as they are then, so after an edit Claude sees whether the errors went away. Every follow-up sends the selected lines again as they are at that moment, and the lines around them too unless they are unchanged since the last message, so Claude always works on the current code: the selection follows its applied edits, your own changes to the lines, and lines added or removed above them, and there is no need to select again. It runs with no tools, MCP servers, hooks or settings files, so it only reads what the popup sends (and, for a [reopened](#history) chat, its own saved session).
 
 Claude also remembers what it changed. Each follow-up starts with a short record of what happened since its last reply, as diffs rather than copies of the code:
 
@@ -240,6 +280,9 @@ Every option, with its default (`opts` for lazy.nvim, or `require("float-claude"
     grammar = { key = "<leader>ag", prompt = "Fix the spelling, grammar and punctuation of this text. Change nothing else.", prose = true },
   },
   prose_filetypes = { "markdown", "gitcommit", "text" }, -- buffers offering the prose actions instead of the code ones
+  max_chats = 5, -- chats open at once (one shown, the others hidden); one more ends the one used longest ago
+  history = { max = 100, days = 30 }, -- save chats to reopen them (see History); either can be false; false: off
+  status = { spinner = { "◐", "◓", "◑", "◒" }, unread = "●" }, -- what status() shows, see Statusline
   width = 50, -- popup width in columns, capped to the screen; longer lines wrap
   max_height = false, -- popup height cap in rows; false: as tall as the screen allows
   placement = "top-right", -- or "cursor": next to the cursor
@@ -250,6 +293,11 @@ Every option, with its default (`opts` for lazy.nvim, or `require("float-claude"
   review_edits = false, -- true: show an edit as a diff and apply it only once accepted
   close_after_edit = false, -- true: close the popup (ending the chat) once an edit is applied
   close_on_leave = false, -- true: leaving the popup (other than with unfocus_key or a jump) closes it
+  -- Normal mode keys for the open chats:
+  next_chat_key = "<leader>an", -- show the next chat
+  prev_chat_key = "<leader>ap", -- show the previous one
+  chats_key = "<leader>al", -- pick an open chat from a list
+  history_key = "<leader>aH", -- pick a saved chat to reopen
   -- Keys in the popup:
   submit_key = "<CR>", -- send the prompt (Insert and Normal mode)
   newline_keys = { "<S-CR>", "<C-j>" }, -- Insert mode: a new line in the prompt

@@ -37,16 +37,26 @@ local function eq(expected, actual, what)
   end
 end
 
-local function test(name, fn)
-  -- ONLY=<text> runs just the tests whose name contains it.
-  if os.getenv("ONLY") and not name:find(os.getenv("ONLY"), 1, true) then
-    return
+-- Start the child Neovim; again (`restart`) for a fresh one with the same state directory.
+local function restart()
+  if chan then
+    vim.fn.jobstop(chan)
   end
   chan = vim.fn.jobstart({ vim.v.progpath, "--clean", "-n", "--embed", "--headless", "--cmd", "set rtp^=" .. root }, {
     rpc = true,
     env = env,
   })
   vim.rpcrequest(chan, "nvim_ui_attach", 80, 24, {})
+end
+
+local function test(name, fn)
+  -- ONLY=<text> runs just the tests whose name contains it.
+  if os.getenv("ONLY") and not name:find(os.getenv("ONLY"), 1, true) then
+    return
+  end
+  env.XDG_STATE_HOME = vim.fn.tempname() -- saved chats (history) start empty
+  chan = nil
+  restart()
   local ok, err = pcall(fn)
   vim.fn.jobstop(chan)
   io.stdout:write((ok and "ok   " or "FAIL ") .. name .. (ok and "" or ("\n     " .. err)) .. "\n")
@@ -83,15 +93,18 @@ local function setup(replies, delay, opts)
     vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
     vim.bo.filetype = "lua"
     vim.wo.number = true
-    -- Test helpers: the transcript lines, and whether `n` answers are complete
-    -- (each ends with a blank row; the first row is padding).
+    -- Test helpers: the transcript lines (of the chat shown, else of the
+    -- first one), and whether `n` answers are complete (each ends with a
+    -- blank row; the first row is padding).
     function _G.transcript()
-      for _, b in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.bo[b].filetype == "float-claude-transcript" then
-          return vim.api.nvim_buf_get_lines(b, 0, -1, false)
+      local found
+      for _, w in ipairs(vim.api.nvim_list_wins()) do
+        local b = vim.api.nvim_win_get_buf(w)
+        if vim.bo[b].filetype == "float-claude-transcript" and (not found or not vim.api.nvim_win_get_config(w).hide) then
+          found = b
         end
       end
-      return {}
+      return found and vim.api.nvim_buf_get_lines(found, 0, -1, false) or {}
     end
     function _G.answered(n)
       local done = 0
@@ -1198,7 +1211,7 @@ test("hide, come back and unfocus with a config like the author's (no mouse, Esc
   eq("float-claude-transcript", lua("return vim.bo.filetype"), "<C-w>w reaches the conversation")
 end)
 
-test("<leader>ai on a new selection starts a fresh chat in place of the open one", function()
+test("<leader>ai on a new selection starts another chat; the open one is hidden, not ended", function()
   local log = setup({ "ANSWER\nok", "ANSWER\nfresh" })
   ask()
   keys("first<CR>")
@@ -1208,8 +1221,8 @@ test("<leader>ai on a new selection starts a fresh chat in place of the open one
   eq({ "  ❯ first", "    ok", "" }, turns(), "Normal mode: the same chat")
   keys("<C-o>")
   keys("8GVj ai")
-  eq({ "", "  [No Name] · L8–9 · 2 lines" }, floats()["float-claude-transcript"].lines, "a fresh chat")
-  eq({ 3, 1 }, { #lua("return vim.api.nvim_list_wins()"), marks() }, "one popup, one selection")
+  eq({ "", "  [No Name] · L8–9 · 2 lines · 2/2" }, floats()["float-claude-transcript"].lines, "a fresh chat")
+  eq({ 5, 2 }, { #lua("return vim.api.nvim_list_wins()"), marks() }, "the first one's windows and selection are kept")
   keys("again<CR>")
   wait("return answered(1)", "the answer")
   eq({ "<start>", "<start>" }, { sent(log)[1], sent(log)[3] }, "a new process")
@@ -1550,8 +1563,9 @@ test(":FloatClaude lists the actions offered here and runs the one picked", func
     "tests       <leader>at",
     "types       <leader>ay",
     "ask         <leader>ai",
+    "history     <leader>aH",
     "theme       auto",
-  }, lua("return listed"), "code actions, ask, theme")
+  }, lua("return listed"), "code actions, ask, history, theme")
   pick("simplify")
   keys("2GVj:FloatClaude<CR>")
   wait("return answered(1)", "the answer")
@@ -1577,7 +1591,8 @@ test("prose actions: reword edits a markdown paragraph in place; offered on comm
     vim.bo.filetype = "markdown"]])
   pick("nothing")
   keys("3G:FloatClaude<CR>")
-  eq({ "grammar     <leader>ag", "reword      <leader>ar", "shorten     <leader>ah", "ask         <leader>ai", "theme       auto" },
+  eq({ "grammar     <leader>ag", "reword      <leader>ar", "shorten     <leader>ah", "ask         <leader>ai", "history     <leader>aH",
+    "theme       auto" },
     lua("return listed"), "prose actions only")
   keys(" ar")
   wait("return answered(1)", "the edit")
@@ -1763,6 +1778,190 @@ test("model: without one set, the header shows the model the CLI reports", funct
   keys("hi<CR>")
   wait("return answered(1)", "the answer")
   eq("  demo.lua · L2–6 · 5 lines · fake-1", floats()["float-claude-transcript"].lines[2])
+end)
+
+-- The header of the chat on screen.
+local function shown_header()
+  return floats()["float-claude-transcript"].lines[2]
+end
+
+test("multiple chats: hidden ones stay independent; next/prev and the picker show one; q ends only that one", function()
+  local log = setup({ "ANSWER\nfirst reply", "ANSWER\nsecond reply" })
+  local function highlighted()
+    return lua([[return #vim.tbl_filter(function(m) return m[4].hl_group == "FloatClaudeSelection" end,
+      vim.api.nvim_buf_get_extmarks(1, -1, 0, -1, { details = true }))]])
+  end
+  ask()
+  keys("a<CR>")
+  wait("return answered(1)", "chat 1's answer")
+  keys("<C-q>")
+  keys("8GVj ai")
+  eq("  [No Name] · L8–9 · 2 lines · 2/2", shown_header(), "a second chat")
+  eq(1, highlighted(), "only the shown chat's lines are highlighted")
+  keys("b<CR>")
+  wait("return answered(1)", "chat 2's answer")
+  keys("<Esc> ap")
+  eq({ "  [No Name] · L2–6 · 5 lines · 1/2", { "  ❯ a", "    first reply", "" }, 2 },
+    { shown_header(), turns(), vim.tbl_count(floats()) }, "previous: chat 1 alone on screen")
+  eq({ "float-claude", "i" }, lua("return { vim.bo.filetype, vim.fn.mode() }"), "in its prompt")
+  keys("<Esc> an")
+  eq({ "  [No Name] · L8–9 · 2 lines · 2/2", { "  ❯ b", "    first reply", "" } }, { shown_header(), turns() }, "next: chat 2")
+  keys("<Esc> an")
+  eq("  [No Name] · L2–6 · 5 lines · 1/2", shown_header(), "wraps around")
+  pick("2/2")
+  keys("<Esc>:FloatClaudeChats<CR>")
+  eq({ "1/2 [No Name] · L2–6 · a", "2/2 [No Name] · L8–9 · b" }, lua("return listed"), "the picker lists both")
+  eq("  [No Name] · L8–9 · 2 lines · 2/2", shown_header(), "picked")
+  eq({ "float-claude", "i" }, lua("return { vim.bo.filetype, vim.fn.mode() }"), "in its prompt")
+  keys("c<CR>")
+  wait("return answered(2)", "chat 2's follow-up")
+  eq({ "  ❯ b", "    first reply", "", "  ❯ c", "    second reply", "" }, turns(), "its own conversation")
+  local msgs = sent(log)
+  eq({ "<start>", "<start>" }, { msgs[1], msgs[3] }, "a process each")
+  assert(msgs[5]:find("Selected lines 8-9:", 1, true), msgs[5])
+  keys("<Esc>q")
+  eq({ {}, 1 }, { floats(), lua("return #require('float-claude.chat').list()") }, "chat 2 ended, chat 1 still hidden")
+  keys(" ai")
+  eq({ "  [No Name] · L2–6 · 5 lines", { "  ❯ a", "    first reply", "" } }, { shown_header(), turns() },
+    "<leader>ai shows chat 1; one chat: no count")
+  -- Past max_chats, opening one more ends the one used longest ago.
+  lua([[require("float-claude").setup({ max_chats = 2 })]])
+  keys("<Esc><C-o>12GV ai")
+  keys("<C-o>20GV ai")
+  eq({ "  [No Name] · L20 · 2/2", 2 }, { shown_header(), lua("return #require('float-claude.chat').list()") })
+  keys("<Esc> ap")
+  eq("  [No Name] · L12 · 1/2", shown_header(), "chat 1 (lines 2-6) ended")
+end)
+
+test("status(): a spinner while a hidden chat answers, a dot for a reply not seen, redrawn only while busy", function()
+  local long = {}
+  for i = 1, 30 do
+    long[i] = "line " .. i
+  end
+  setup({ "ANSWER\n" .. table.concat(long, "\n") }, 30)
+  -- Count the statusline's redraws.
+  lua([[
+    _G.redraws = 0
+    function _G.statusline() _G.redraws = _G.redraws + 1 return require("float-claude").status() end
+    vim.o.laststatus = 2
+    vim.o.statusline = "%{v:lua.statusline()}"
+  ]])
+  local function status()
+    return lua([[return require("float-claude").status()]])
+  end
+  ask()
+  eq("", status(), "idle")
+  keys("hi<CR>")
+  wait([[return transcript()[4] == "    line 1"]], "the answer to start")
+  eq("", status(), "answering on screen")
+  keys("<C-q>")
+  assert(vim.tbl_contains({ "◐", "◓", "◑", "◒" }, status()), status())
+  local before = lua("return redraws")
+  lua("vim.wait(400)")
+  assert(lua("return redraws") - before >= 2, "redrawn while answering")
+  wait([[return require("float-claude").status() == "●"]], "the answer to end")
+  lua("vim.wait(200)")
+  before = lua("return redraws")
+  lua("vim.wait(400)")
+  eq(before, lua("return redraws"), "no redraws once idle")
+  keys(" ai")
+  eq("", status(), "seen")
+end)
+
+-- The arguments the fake CLI was started with, each start as one string.
+local function starts(log)
+  local out = {}
+  for _, line in ipairs(vim.fn.readfile(log)) do
+    local argv = vim.json.decode(line).argv
+    if argv then
+      table.insert(out, table.concat(vim.tbl_map(function(i)
+        return argv[tostring(i)]
+      end, vim.fn.range(1, vim.tbl_count(argv) - 1)), " "))
+    end
+  end
+  return out
+end
+
+test("history: a chat is saved, reopened after a restart from the picker, and its session resumed", function()
+  setup({ "ANSWER\nO(n²).", "ANSWER\nYes." })
+  local dir = workdir({ ["demo.lua"] = ORIGINAL, ["other.lua"] = { "x" } })
+  keys(":edit demo.lua<CR>")
+  ask()
+  keys("time complexity?<CR>")
+  wait("return answered(1)", "the answer")
+  keys("<Esc>q")
+  restart()
+  local log = setup({ "ANSWER\nStill O(n²)." })
+  lua("vim.cmd.cd(...)", dir)
+  keys(":edit other.lua<CR>")
+  pick("demo.lua")
+  keys(":FloatClaudeHistory<CR>")
+  eq({ "demo.lua · L2–6 · just now · time complexity?" }, lua("return listed"), "the saved chat")
+  eq({ "demo.lua", "  demo.lua · L2–6 · 5 lines", { "  ❯ time complexity?", "    O(n²).", "" } },
+    { lua("return vim.fn.fnamemodify(vim.api.nvim_buf_get_name(vim.b.float_claude_source), ':t')"), shown_header(), turns() },
+    "reopened on its file")
+  wait("return logged(1)", "the CLI to start")
+  assert(starts(log)[1]:find("--resume fake-session", 1, true) and not starts(log)[1]:find("--no-session-persistence", 1, true), starts(log)[1])
+  keys("and now?<CR>")
+  wait("return answered(2)", "the answer")
+  local msg = sent(log)[2]
+  assert(vim.startswith(msg, "The current version of the code") and vim.endswith(msg, "Request: and now?"), msg)
+  keys("<Esc>q")
+  eq(1, #lua([[return require("float-claude.history").list()]]), "saved again, as the same chat")
+end)
+
+test("history: a session that cannot be resumed starts afresh with the conversation as text; history = false", function()
+  setup({ "ANSWER\nO(n²)." })
+  local dir = workdir({ ["demo.lua"] = ORIGINAL })
+  keys(":edit demo.lua<CR>")
+  ask()
+  keys("time complexity?<CR>")
+  wait("return answered(1)", "the answer")
+  keys("<Esc>q")
+  -- The CLI no longer has the session.
+  lua([[local h = require("float-claude.history")
+    local c = h.list()[1]
+    c.session = "gone"
+    h.save(c, {})]])
+  local log = setup({ "ANSWER\nStill O(n²)." })
+  pick("demo.lua")
+  keys(":FloatClaudeHistory<CR>")
+  wait([[return vim.iter(transcript()):any(function(l) return l:find("could not resume", 1, true) ~= nil end)]], "the notice")
+  eq({ "  ❯ time complexity?", "    O(n²).", "", "  Claude could not resume this chat (No", "  conversation found with session ID: gone), so",
+    "  it gets the conversation above as text.", "" }, turns())
+  keys("and now?<CR>")
+  wait("return answered(3)", "the answer")
+  eq({ "--resume gone", "" }, vim.tbl_map(function(a)
+    return a:match("%-%-resume %S+") or ""
+  end, starts(log)), "started again without it")
+  local msg = sent(log)[3]
+  assert(vim.startswith(msg, "This chat was reopened, but your session could not be resumed. The conversation so far:\n"
+    .. "Request: time complexity?\nYour reply: O(n²).\n\nThe current version of the code"), msg)
+  -- Off: nothing saved, the CLI saves no session either.
+  keys("<Esc>q")
+  lua("vim.fn.delete(vim.fn.stdpath('state') .. '/float-claude', 'rf')")
+  log = setup({ "ANSWER\nok" }, 0, { history = false })
+  lua("vim.cmd.cd(...)", dir)
+  ask()
+  keys("hi<CR>")
+  wait("return answered(1)", "the answer")
+  eq({ {}, true }, { lua([[return require("float-claude.history").list()]]), starts(log)[1]:find("--no-session-persistence", 1, true) ~= nil })
+  keys("<Esc>:FloatClaudeHistory<CR>")
+  eq("float-claude: history is off", last_message())
+end)
+
+test("history: retention keeps the latest max chats, none older than days", function()
+  setup()
+  eq({ { "c", "b", "a" }, { "d", "c" } }, lua([[
+    local h = require("float-claude.history")
+    local function ids() return vim.tbl_map(function(c) return c.id end, h.list()) end
+    h.save({ id = "a", time = os.time() - 40 * 86400 }, {})
+    h.save({ id = "b", time = os.time() - 2 }, {})
+    h.save({ id = "c", time = os.time() - 1 }, {})
+    local kept = ids()
+    h.save({ id = "d", time = os.time() }, { max = 2, days = 30 })
+    return { kept, ids() }
+  ]]))
 end)
 
 if failures > 0 then

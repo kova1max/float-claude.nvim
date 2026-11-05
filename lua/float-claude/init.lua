@@ -55,6 +55,15 @@ local config = {
   },
   -- Filetypes whose buffers are prose: they offer the prose actions instead of the code ones.
   prose_filetypes = { "markdown", "gitcommit", "text" },
+  -- Chats open at once (one shown, the others hidden); opening one more ends
+  -- the one used longest ago.
+  max_chats = 5,
+  -- Save chats about a file, to reopen them later (:FloatClaudeHistory): at most
+  -- `max` of them, none older than `days` days (either can be false). false: off.
+  history = { max = 100, days = 30 },
+  -- require("float-claude").status() for a statusline: a spinner while a hidden
+  -- chat is answering, `unread` when one has a reply you have not seen.
+  status = { spinner = { "◐", "◓", "◑", "◒" }, unread = "●" },
   -- Popup width in columns (capped to the screen). Longer lines wrap onto more rows.
   width = 50,
   -- Popup height cap in rows; `false`: as tall as the screen allows.
@@ -78,6 +87,11 @@ local config = {
   close_after_edit = false,
   -- Close the popup (ending the chat) when you leave it, other than with unfocus_key or a jump.
   close_on_leave = false,
+  -- Normal mode keys for the open chats. Any of them can be `false` to leave it unmapped.
+  next_chat_key = "<leader>an", -- show the next chat
+  prev_chat_key = "<leader>ap", -- show the previous one
+  chats_key = "<leader>al", -- pick an open chat from a list
+  history_key = "<leader>aH", -- pick a saved chat to reopen
   -- Keys in the popup. Any of them can be `false` to leave it unmapped.
   submit_key = "<CR>", -- send the prompt
   newline_keys = { "<S-CR>", "<C-j>" }, -- Insert mode: a new line in the prompt
@@ -200,6 +214,20 @@ function M.palette(range)
   if current and not current.hidden() then
     table.insert(items, { label = string.format("%-11s %s", "hide", config.hide_key or ""), run = current.hide })
   end
+  if #chat.list() > 1 then
+    for _, item in ipairs({ { "next chat", config.next_chat_key, 1 }, { "prev chat", config.prev_chat_key, -1 } }) do
+      table.insert(items, {
+        label = string.format("%-11s %s", item[1], item[2] or ""),
+        run = function()
+          M.cycle(item[3])
+        end,
+      })
+    end
+    table.insert(items, { label = string.format("%-11s %s", "chats", config.chats_key or ""), run = M.chats })
+  end
+  if config.history then
+    table.insert(items, { label = string.format("%-11s %s", "history", config.history_key or ""), run = M.history })
+  end
   if current then
     for _, kind in ipairs({ "model", "effort" }) do
       table.insert(items, {
@@ -257,6 +285,112 @@ function M.switch(kind, value)
   end)
 end
 
+---Show and focus the open chat `step` places after the current one (before
+---it, if negative).
+function M.cycle(step)
+  if not require("float-claude.chat").cycle(step) then
+    require("float-claude.util").error("no chat is open")
+  end
+end
+
+---Pick an open chat from a list (vim.ui.select) and show it.
+function M.chats()
+  local chat = require("float-claude.chat")
+  local list = chat.list()
+  if #list == 0 then
+    return require("float-claude.util").error("no chat is open")
+  end
+  vim.ui.select(list, {
+    prompt = "float-claude chats",
+    format_item = function(c)
+      local _, i = chat.find(c.id)
+      local state = c.answering() and " (answering)" or c.unread() and " (new reply)" or ""
+      return string.format("%d/%d %s%s", i, #list, c.label(), state)
+    end,
+  }, function(c)
+    if c and chat.find(c.id) then
+      c.focus()
+    end
+  end)
+end
+
+-- "5m ago", "3h ago", ...
+local function ago(time)
+  local secs = os.time() - time
+  for _, unit in ipairs({ { 86400, "d" }, { 3600, "h" }, { 60, "m" } }) do
+    if secs >= unit[1] then
+      return math.floor(secs / unit[1]) .. unit[2] .. " ago"
+    end
+  end
+  return "just now"
+end
+
+-- Reopen saved chat `saved` (see history.lua) in the window it is picked from,
+-- or show it if it is open.
+local function reopen(saved)
+  local chat, util = require("float-claude.chat"), require("float-claude.util")
+  local open = chat.find(saved.id)
+  if open then
+    return open.focus()
+  end
+  if vim.fn.filereadable(saved.file) == 0 then
+    return util.error("cannot reopen the chat, its file is gone: " .. saved.file)
+  end
+  chat.hide() -- from the popup: back in the code
+  if vim.api.nvim_buf_get_name(0) ~= saved.file then
+    local ok, err = pcall(vim.cmd.edit, vim.fn.fnameescape(saved.file))
+    if not ok then
+      return util.error(err)
+    end
+  end
+  -- The file may have changed since: the lines are kept within it.
+  local count = vim.api.nvim_buf_line_count(0)
+  local first = math.min(saved.first, count)
+  chat.open(vim.tbl_extend("force", config, {
+    first = first,
+    last = math.min(math.max(saved.last, first), count),
+    selected = saved.selected,
+    restore = saved,
+  }))
+end
+
+---Pick a saved chat about the current file or a file under the current
+---directory from a list (vim.ui.select), latest first, and reopen it.
+function M.history()
+  local chat, util = require("float-claude.chat"), require("float-claude.util")
+  if not config.history then
+    return util.error("history is off")
+  end
+  local current = chat.current()
+  local buf = in_popup() and current and current.source() or vim.api.nvim_get_current_buf()
+  local file, cwd = vim.api.nvim_buf_get_name(buf), vim.fn.getcwd()
+  local saved = vim.tbl_filter(function(c)
+    return c.file == file or vim.startswith(c.file, cwd .. "/")
+  end, require("float-claude.history").list())
+  if #saved == 0 then
+    return vim.api.nvim_echo({ { "float-claude: no saved chats for this file or directory" } }, false, {})
+  end
+  vim.ui.select(saved, {
+    prompt = "float-claude history",
+    format_item = function(c)
+      local q = vim.trim((c.exchanges[1].q:gsub("%s+", " ")))
+      return string.format("%s · L%s · %s · %s", vim.fn.fnamemodify(c.file, ":~:."),
+        c.first == c.last and c.first or c.first .. "–" .. c.last, ago(c.time),
+        vim.fn.strchars(q) > 50 and vim.fn.strcharpart(q, 0, 49) .. "…" or q)
+    end,
+  }, function(c)
+    if c then
+      reopen(c)
+    end
+  end)
+end
+
+---For a statusline: a spinner while a hidden chat is answering, a dot when
+---one has a reply you have not seen, else "" (see the `status` option).
+function M.status()
+  return require("float-claude.chat").status(config.status)
+end
+
 -- Color the popup with the configured theme, an open one too.
 local function restyle()
   require("float-claude.chat").restyle(require("float-claude.theme").apply(config.theme, config.colors))
@@ -272,6 +406,25 @@ function M.setup(opts)
     vim.keymap.set({ "n", "x" }, config.keymap, function()
       M.ask()
     end, { desc = "float-claude: ask Claude" })
+  end
+  local chat_commands = {
+    { "Next", config.next_chat_key, "show the next chat", function()
+      M.cycle(1)
+    end },
+    { "Prev", config.prev_chat_key, "show the previous chat", function()
+      M.cycle(-1)
+    end },
+    { "Chats", config.chats_key, "pick an open chat", M.chats },
+    { "History", config.history_key, "reopen a saved chat", M.history },
+  }
+  for _, c in ipairs(chat_commands) do
+    local name, key, desc, run = unpack(c)
+    vim.api.nvim_create_user_command("FloatClaude" .. name, function()
+      run()
+    end, { desc = "float-claude: " .. desc })
+    if key then
+      vim.keymap.set("n", key, run, { desc = "float-claude: " .. desc })
+    end
   end
   local group = vim.api.nvim_create_augroup("float-claude", {})
   for name, action in pairs(config.actions) do
