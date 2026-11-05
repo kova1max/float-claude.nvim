@@ -450,7 +450,7 @@ function M.open(opts)
   end
 
   -- Read the selected ranges back from their extmarks (not while an edit
-  -- writes them or waits for review). A block whose lines were all deleted is
+  -- writes them or waits for review). A range whose lines were all deleted is
   -- dropped, but not while a reply is due (its numbering holds until then);
   -- the last one left stays, and the chat is ask-only while it is deleted.
   local function sync_selection()
@@ -972,8 +972,7 @@ function M.open(opts)
       for _, r in ipairs(result.ranges) do
         local range = s.ranges[r.n]
         if not range.block then
-          ranges.untrack(s.buf, ns, range)
-          s.ranges[r.n] = ranges.track(s.buf, ns, { first = r.first, last = r.first + r.new - 1 }, selection_hl())
+          ranges.move(s.buf, ns, range, r.first, r.first + r.new - 1, selection_hl())
         end
       end
       sync_selection()

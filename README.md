@@ -97,6 +97,8 @@ To ask about separate parts of a file at once, collect them first: select one an
 
 Claude gets each range by its number, and answers about them, or edits them in one reply: each range it changes, by its number, is replaced in place (the others stay as they are), and ranges below one that grew or shrank stay on their lines. All of the reply's changes are one `u`. With `review_edits`, each changed range shows its own diff, and one accept writes them all (one discard drops them all). Every follow-up sends every range as it is then.
 
+If you delete all the lines of a range (or a block) while its chat is open, the chat drops that range with a note such as `range 1 was deleted`, and the ranges left are numbered anew in the next message. Lines replaced as a whole count as deleted too: a filter such as `:%!fmt`, or a formatter that rewrites the whole buffer, turns the selection into deleted code. When the last range left is deleted, the chat stays open but is ask-only: it says `the selected code was deleted - select again to edit`, sends no selection, and does not apply an edit (select the code again in a new chat). While Claude is replying, the ranges keep their numbers; an edit for ranges of which one was deleted, or that now share lines, is not applied, and the reply stays in the chat as an answer with a note. A block's line that is replaced as a whole (not just edited) also leaves the block. `u` after an applied edit puts the ranges back on the old lines.
+
 ### Actions
 
 One key sends a ready-made prompt: the popup opens and the prompt goes out right away, as if you had typed it.
