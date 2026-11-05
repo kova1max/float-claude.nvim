@@ -154,12 +154,20 @@ function M.read(buf, ns, r)
     local row, end_row, end_col = marks[1][1], marks[1][3].end_row, marks[1][3].end_col
     return { first = row + 1, last = math.max(end_col == 0 and end_row > row and end_row or end_row + 1, row + 1) }
   end
-  local rows = {}
+  local by_line = {}
   for _, m in ipairs(marks) do
     -- A part's line joined with another one's: the part now ends on that line.
-    local ecol = m[3].end_row == m[1] and m[3].end_col or #vim.fn.getbufline(buf, m[1] + 1)[1]
-    table.insert(rows, { m[1] + 1, m[2], math.max(ecol, m[2]) })
+    local ecol = math.max(m[3].end_row == m[1] and m[3].end_col or #vim.fn.getbufline(buf, m[1] + 1)[1], m[2])
+    -- Parts now on one line (a line deleted or joined) are one part: a part
+    -- emptied by its line's deletion does not count next to another.
+    local row = by_line[m[1] + 1]
+    if not row or row[2] == row[3] then
+      by_line[m[1] + 1] = { m[1] + 1, m[2], ecol }
+    elseif m[2] < ecol then
+      row[2], row[3] = math.min(row[2], m[2]), math.max(row[3], ecol)
+    end
   end
+  local rows = vim.tbl_values(by_line)
   table.sort(rows, function(a, b)
     return a[1] < b[1]
   end)

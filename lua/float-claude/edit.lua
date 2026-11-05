@@ -19,7 +19,8 @@ local diff = util.diff
 ---  `buf` must be modifiable.
 ---  `targets` are what the reply replaces, in file order, apart from each
 ---  other: lines `first`..`last` (1-based), or with `rows` a block: the bytes
----  [rows[k][2], rows[k][3]) of line rows[k][1] (lines first..last), and `pad`
+---  [rows[k][2], rows[k][3]) of line rows[k][1] (one row per line, in order,
+---  within first..last), and `pad`
 ---  spaces to put before text added to a line that ends left of the block. The
 ---  reply's line k replaces a block's row k; rows it leaves out are emptied,
 ---  lines past them are added below. With `numbered`, the reply gives each
@@ -55,9 +56,19 @@ function M.start(opts)
     return row
   end
 
+  -- 0-based row of the line the reply's line `k` for target `t` goes to: a
+  -- block's row k is on its own line, the lines past them below the block.
+  local function line_of(t, k)
+    if not t.rows then
+      return top(t) + k - 1
+    end
+    local r = t.rows[k]
+    return top(t) + (r and r[1] - t.first or t.last - t.first + k - #t.rows)
+  end
+
   local function draw_spinner()
     local t = active or targets[1]
-    local row = review and t.first - 1 or top(t) + math.max(#t.new - 1, 0)
+    local row = review and t.first - 1 or line_of(t, math.max(#t.new, 1))
     local text = written == 0 and (SPINNER[frame] .. " refactoring…") or SPINNER[frame]
     spinner_mark = vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {
       id = spinner_mark,
@@ -89,12 +100,13 @@ function M.start(opts)
   -- A block target's lines with the reply's parts so far; once it is `done`,
   -- the rows the reply left out are emptied. Then the reply's lines past its rows.
   local function block_lines(t, done)
-    local out = {}
+    local out = vim.deepcopy(t.old)
     for k, row in ipairs(t.rows) do
-      local line = t.old[k]
+      local i = row[1] - t.first + 1
+      local line = t.old[i]
       local part = t.new[k] or (done and "" or line:sub(row[2] + 1, row[3]))
       local pad = t.new[k] and part ~= "" and string.rep(" ", row.pad) or ""
-      table.insert(out, line:sub(1, row[2]) .. pad .. part .. line:sub(row[3] + 1))
+      out[i] = line:sub(1, row[2]) .. pad .. part .. line:sub(row[3] + 1)
     end
     return vim.list_extend(out, t.new, #t.rows + 1)
   end
@@ -179,7 +191,7 @@ function M.start(opts)
         vim.cmd("let &l:undolevels = &l:undolevels")
         joined = true
       end
-      local row = top(t) + k - 1
+      local row = line_of(t, k)
       local r = t.rows and t.rows[k]
       if r then -- a block's row: its part
         vim.api.nvim_buf_set_text(buf, row, r[2], row, r[3], { (line ~= "" and string.rep(" ", r.pad) or "") .. line })
@@ -238,7 +250,7 @@ function M.start(opts)
       return render()
     end
     put(t, #t.new, line)
-    vim.api.nvim_buf_set_extmark(buf, ns, top(t) + #t.new - 1, 0, { line_hl_group = "FloatClaudeAdded" })
+    vim.api.nvim_buf_set_extmark(buf, ns, line_of(t, #t.new), 0, { line_hl_group = "FloatClaudeAdded" })
     draw_spinner()
   end
 
@@ -247,7 +259,7 @@ function M.start(opts)
     local out = { old = 0, new = 0, ranges = {} }
     for i, t in ipairs(targets) do
       if #t.new > 0 then
-        local count = t.rows and math.max(#t.new, #t.rows) or #t.new
+        local count = t.rows and #t.old + math.max(#t.new - #t.rows, 0) or #t.new
         table.insert(out.ranges, { n = i, first = top(t) + 1, was = t.first, old = #t.old, new = count })
         out.old, out.new = out.old + #t.old, out.new + count
       end
