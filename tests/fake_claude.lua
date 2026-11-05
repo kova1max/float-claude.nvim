@@ -3,9 +3,11 @@
 -- reply from $FAKE_CLAUDE_REPLIES (a JSON list) as text deltas, then a result.
 -- A reply is a string streamed one line per delta, or a list of the deltas.
 -- A reply "!error <msg>" ends the turn with an error result; "!exit <msg>" prints
--- <msg> to stderr and exits 1. Control requests get a control response. With
--- $FAKE_CLAUDE_MODEL, each turn starts with an init event naming it. Received
--- messages are appended to $FAKE_CLAUDE_LOG.
+-- <msg> to stderr and exits 1. Control requests get a control response. Each
+-- turn starts with an init event naming the session ("fake-session", or the
+-- one resumed) and $FAKE_CLAUDE_MODEL, if set. `--resume gone` fails as the
+-- CLI does for a session it cannot find. Received messages are appended to
+-- $FAKE_CLAUDE_LOG.
 local replies = vim.json.decode(os.getenv("FAKE_CLAUDE_REPLIES"))
 local delay = tonumber(os.getenv("FAKE_CLAUDE_DELAY") or "0")
 local log = io.open(os.getenv("FAKE_CLAUDE_LOG"), "a")
@@ -15,6 +17,18 @@ log:flush()
 local function emit(event)
   io.stdout:write(vim.json.encode(event), "\n")
   io.stdout:flush()
+end
+
+local session = "fake-session"
+for i, a in ipairs(arg) do
+  if a == "--resume" then
+    session = arg[i + 1]
+  end
+end
+if session == "gone" then
+  emit({ type = "result", subtype = "error_during_execution", is_error = true, session_id = session,
+    errors = { "No conversation found with session ID: gone" } })
+  os.exit(1)
 end
 
 local turn = 0
@@ -33,9 +47,7 @@ for line in io.stdin:lines() do
     goto continue
   end
   turn = turn + 1
-  if os.getenv("FAKE_CLAUDE_MODEL") then
-    emit({ type = "system", subtype = "init", model = os.getenv("FAKE_CLAUDE_MODEL") })
-  end
+  emit({ type = "system", subtype = "init", session_id = session, model = os.getenv("FAKE_CLAUDE_MODEL") })
   local reply = replies[turn] or ""
   local deltas = type(reply) == "table" and reply or nil
   if deltas then

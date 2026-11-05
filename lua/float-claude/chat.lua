@@ -3,6 +3,7 @@
 local answer = require("float-claude.answer")
 local claude = require("float-claude.claude")
 local edit = require("float-claude.edit")
+local history = require("float-claude.history")
 local lsp = require("float-claude.lsp")
 local mentions = require("float-claude.mentions")
 local theme = require("float-claude.theme")
@@ -10,12 +11,46 @@ local util = require("float-claude.util")
 
 local M = {}
 
-local active -- the open popup, if any: { focus = fun(), close = fun(), restyle = fun(ns) }
+-- The open chats, oldest first (see M.open for what each one offers); at most
+-- one is shown, the others hidden. `current` is the one last shown, `uses`
+-- counts the times one was opened or shown.
+local chats, current, uses = {}, nil, 0
 
 local ns = vim.api.nvim_create_namespace("float-claude")
 local PREFIX = 4 -- "  ❯ " / "    " before every text line: 2 columns of padding, then the prompt
 local SPINNER = { "◐", "◓", "◑", "◒" }
+local SPIN_MS = 130 -- a spinner's frame time
 local DIFF_CONTEXT = 2 -- unchanged lines around each change in the diffs sent
+
+local status_timer -- redraws the statuslines while a hidden chat is answering
+
+-- Redraw the statuslines (see M.status) now, and keep doing so while a hidden
+-- chat is answering.
+local function update_status()
+  local busy = vim.iter(chats):any(function(c)
+    return c.hidden() and c.answering()
+  end)
+  if busy and not status_timer then
+    status_timer = assert(vim.uv.new_timer())
+    status_timer:start(SPIN_MS, SPIN_MS, vim.schedule_wrap(function()
+      vim.cmd.redrawstatus({ bang = true })
+    end))
+  elseif not busy and status_timer then
+    status_timer:stop()
+    status_timer:close()
+    status_timer = nil
+  end
+  vim.cmd.redrawstatus({ bang = true })
+end
+
+-- The open chat with id `id`, and its number (1 for the oldest).
+local function find(id)
+  for i, c in ipairs(chats) do
+    if c.id == id then
+      return c, i
+    end
+  end
+end
 
 local function width_of(s)
   return vim.fn.strdisplaywidth(s)
@@ -77,6 +112,19 @@ end
 local function summary(request)
   local text = vim.trim((request:gsub("%s+", " ")))
   return vim.fn.strchars(text) > 60 and vim.fn.strcharpart(text, 0, 59) .. "…" or text
+end
+
+-- The finished turns of a restored chat as text, for a CLI that could not
+-- resume its session: Claude remembers the chat from it.
+local function replay(s)
+  local out = { "This chat was reopened, but your session could not be resumed. The conversation so far:" }
+  for _, ex in ipairs(s.exchanges) do
+    if ex.done then
+      table.insert(out, "Request: " .. ex.q)
+      table.insert(out, ex.edit and "Your reply: an EDIT (" .. (ex.note or "") .. ")" or "Your reply: " .. ex.a)
+    end
+  end
+  return table.concat(out, "\n") .. "\n\n"
 end
 
 -- The request with the selected lines and their context as they are now. A
@@ -212,15 +260,18 @@ local function transcript_keymaps(s, opts, close, on_link)
   map(s.tbuf, "n", opts.line_down_key, "<C-e>")
 end
 
--- "test.js · L7–13 · 7 lines", or "test.js · L7" for a single line, then the
--- chat's model (as chosen, else as the CLI reports it) and effort, if known.
+-- "test.js · L7–13 · 7 lines", or "test.js · L7" for a single line, then
+-- which chat it is when there are several ("2/3"), and the chat's model (as
+-- chosen, else as the CLI reports it) and effort, if known.
 local function header(s, width)
   local name = vim.api.nvim_buf_get_name(s.buf)
   name = name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":t")
   local text = s.first == s.last and string.format("%s · L%d", name, s.first)
     or string.format("%s · L%d–%d · %d lines", name, s.first, s.last, s.last - s.first + 1)
   local tail = ""
-  for _, part in ipairs({ s.model or s.reported or false, s.effort or false }) do
+  local _, n = find(s.id)
+  local which = #chats > 1 and n and string.format("%d/%d", n, #chats)
+  for _, part in ipairs({ which or false, s.model or s.reported or false, s.effort or false }) do
     if part then
       tail = tail .. " · " .. part
     end
@@ -237,14 +288,24 @@ end
 ---  highlighted while the popup is open. With `review_edits`, an edit shows as
 ---  a diff until `accept_key` or `discard_key` is pressed in the popup.
 ---  `hide_key` hides the popup and `unfocus_key` leaves it on screen; either
----  way the conversation goes on, and M.focus() comes back to it. A popup
----  already open is closed first. With `send`, that prompt is sent right away.
+---  way the conversation goes on, and M.focus() comes back to it. A chat
+---  already shown is hidden first; past `max_chats`, the one used longest ago
+---  ends. With `send`, that prompt is sent right away. With `restore` (a chat
+---  from history.lua), its conversation is shown and its CLI session resumed.
 function M.open(opts)
-  if active then
-    active.close()
+  M.hide()
+  while opts.max_chats and #chats >= math.max(opts.max_chats, 1) do
+    local oldest = chats[1]
+    for _, c in ipairs(chats) do
+      oldest = c.used < oldest.used and c or oldest
+    end
+    oldest.close()
   end
   local hl_ns = theme.apply(opts.theme, opts.colors)
+  local saved = opts.restore or {}
   local s = {
+    id = saved.id or string.format("%d-%d", os.time(), vim.uv.hrtime() % 1000000),
+    session = saved.session, -- the CLI's session id
     win = vim.api.nvim_get_current_win(),
     buf = vim.api.nvim_get_current_buf(),
     cursor = vim.api.nvim_win_get_cursor(0),
@@ -252,10 +313,10 @@ function M.open(opts)
     last = opts.last,
     context_lines = opts.context_lines,
     diagnostics = opts.diagnostics,
-    model = opts.model or nil, -- as chosen; `reported` is what the CLI says it runs
-    effort = opts.effort or nil,
+    model = saved.model or opts.model or nil, -- as chosen; `reported` is what the CLI says it runs
+    effort = saved.effort or opts.effort or nil,
     -- { q = string, a = string, done = boolean, edit = boolean?, note = string?, mentions = string[]? }
-    exchanges = {},
+    exchanges = saved.exchanges or {},
     follow = true,
     frame = 1,
     hidden = false,
@@ -266,7 +327,8 @@ function M.open(opts)
     -- since its last reply, `edits` its applied edits.
     known = nil,
     log = {},
-    edits = {}, -- { request, first, old, new }
+    edits = saved.edits or {}, -- { request, first, old, new }
+    unread = false, -- a reply ended while hidden
   }
   local ft = vim.bo[s.buf].filetype
   s.lang = ft ~= "" and (vim.treesitter.language.get_lang(ft) or ft) or nil
@@ -276,25 +338,67 @@ function M.open(opts)
 
   local closed = false
   local proc, editing, reviewing, spin_timer -- reviewing: the edit whose diff waits for a decision
-  local close
+  local close, chat -- chat: what M.current() and the others hand out
 
   -- Screen cell of the cursor (0-based), for the "cursor" placement.
   local cursor_pos = vim.fn.screenpos(s.win, s.cursor[1], s.cursor[2] + 1)
   local cursor_row, cursor_col = cursor_pos.row - 1, cursor_pos.col - 1
 
   -- The selected lines are an extmark, so they follow changes made since: typing
-  -- in them, lines added or removed above them. Highlighted if from Visual mode.
+  -- in them, lines added or removed above them. Highlighted if from Visual
+  -- mode, while the chat is not hidden.
   local function set_selection()
     local count = vim.api.nvim_buf_line_count(s.buf)
     local last_line = vim.api.nvim_buf_get_lines(s.buf, s.last - 1, s.last, false)[1]
     s.sel_mark = vim.api.nvim_buf_set_extmark(s.buf, ns, s.first - 1, 0, {
       end_row = s.last < count and s.last or s.last - 1,
       end_col = s.last < count and 0 or #last_line,
-      hl_group = opts.selected and "FloatClaudeSelection" or nil,
+      hl_group = opts.selected and not s.hidden and "FloatClaudeSelection" or nil,
       priority = 200,
     })
   end
   set_selection()
+
+  -- Highlight the selected lines, or not, as set_selection() does.
+  local function highlight_selection()
+    local m = vim.api.nvim_buf_is_loaded(s.buf) and vim.api.nvim_buf_get_extmark_by_id(s.buf, ns, s.sel_mark, { details = true })
+    if m and m[1] then
+      vim.api.nvim_buf_set_extmark(s.buf, ns, m[1], m[2], {
+        id = s.sel_mark,
+        end_row = m[3].end_row,
+        end_col = m[3].end_col,
+        hl_group = opts.selected and not s.hidden and "FloatClaudeSelection" or nil,
+        priority = 200,
+      })
+    end
+  end
+
+  -- Save the chat's finished turns (history.lua), if on and about a file.
+  local function save()
+    local file = vim.api.nvim_buf_get_name(s.buf)
+    local done = vim.tbl_filter(function(ex)
+      return ex.done
+    end, s.exchanges)
+    if not opts.history or file == "" or #done == 0 then
+      return
+    end
+    history.save({
+      id = s.id,
+      time = os.time(),
+      cwd = vim.fn.getcwd(),
+      file = file,
+      first = s.first,
+      last = s.last,
+      selected = opts.selected,
+      session = s.session,
+      model = s.model,
+      effort = s.effort,
+      exchanges = vim.tbl_map(function(ex)
+        return { q = ex.q, a = ex.a, done = true, edit = ex.edit, note = ex.note, mentions = ex.mentions }
+      end, done),
+      edits = s.edits,
+    }, opts.history)
+  end
 
   -- Read the selected lines back from the extmark (all of them deleted: the
   -- line that took their place).
@@ -450,6 +554,12 @@ function M.open(opts)
         add_answer(ex, text_width)
       end
       if ex.done then
+        add("")
+      end
+      if ex.notice then -- about the chat as a whole, after the turns it concerns
+        for _, l in ipairs(answer.wrap(ex.notice, width - 3)) do
+          add("  " .. l, "FloatClaudeHistory")
+        end
         add("")
       end
     end
@@ -689,8 +799,17 @@ function M.open(opts)
       return
     end
     local refocus = focused()
-    if active and active.close == close then
-      active = nil
+    chats = vim.tbl_filter(function(c)
+      return c ~= chat
+    end, chats)
+    if current == chat then -- the one used last before it, if any
+      current = nil
+      for _, c in ipairs(chats) do
+        current = (not current or c.used > current.used) and c or current
+      end
+    end
+    for _, c in ipairs(chats) do -- their headers count the chats
+      c.layout()
     end
     close_windows()
     if reviewing then
@@ -707,6 +826,7 @@ function M.open(opts)
     if refocus then
       leave(true)
     end
+    update_status()
   end
 
   local function fail(msg)
@@ -719,6 +839,13 @@ function M.open(opts)
     if proc then
       proc.stop()
     end
+  end
+
+  -- A reply ended, or its edit waits for review: saved, and unread while hidden.
+  local function finished()
+    s.unread = s.hidden
+    save()
+    update_status()
   end
 
   -- The edit is over: `result` has the line counts when it was applied, also
@@ -738,6 +865,7 @@ function M.open(opts)
       ex.note = string.format("review: %d → %d lines\n%s accept · %s discard", result.old, result.new,
         opts.accept_key, opts.discard_key)
       stop_spinner()
+      finished()
       return layout()
     end
     if result.discarded then
@@ -756,13 +884,14 @@ function M.open(opts)
       end
       clear_selection()
       set_selection()
-      if opts.close_after_edit then
-        return close()
-      end
     end
     ex.note = note
     ex.done = true
     stop_spinner()
+    finished()
+    if opts.close_after_edit and not result.discarded then
+      return close()
+    end
     layout()
     if focused() then
       vim.api.nvim_set_current_win(s.iwin)
@@ -775,10 +904,23 @@ function M.open(opts)
     if not vim.api.nvim_buf_is_loaded(s.buf) then
       return fail("the buffer was unloaded")
     end
+    local ex = s.exchanges[#s.exchanges]
+    for i, c in ipairs(chats) do
+      local held = c ~= chat and c.holds(s.buf)
+      if held then -- one chat edits a buffer at a time: the reply stays an answer, its code a code block
+        ex.a = "```\n" .. code
+        ex.notice = string.format(held == "pending" and "chat %d/%d has an edit pending on this file - accept or discard it first"
+          or "chat %d/%d is editing this file - ask again once it is done", i, #chats)
+        table.insert(s.log, string.format('- Your EDIT for "%s" was not applied: another chat was editing the file.', summary(ex.q)))
+        if ex.a ~= "" then
+          stop_spinner()
+        end
+        return layout()
+      end
+    end
     if not vim.bo[s.buf].modifiable then
       return fail("the buffer is not modifiable")
     end
-    local ex = s.exchanges[#s.exchanges]
     ex.edit = true
     sync_selection()
     note_hand_changes() -- made while Claude was replying; its edit's diff leaves them out
@@ -839,16 +981,17 @@ function M.open(opts)
       tag, rest = parse_tag(reply, true)
       if tag == "EDIT" then
         start_edit(rest)
-        if editing then
-          editing.finish()
+        if editing or closed then
+          return editing and editing.finish()
         end
-        return
+      else
+        ex.a = rest
       end
-      ex.a = rest
     end
     ex.a = vim.trim(ex.a)
     ex.done = true
     stop_spinner()
+    finished()
     layout()
     if focused() then
       vim.api.nvim_set_current_win(s.iwin)
@@ -865,6 +1008,10 @@ function M.open(opts)
     note_hand_changes()
     local mentioned = opts.mentions and mentions.expand(text, s.buf, opts.mentions) or {}
     local msg = message(s, text, #s.exchanges > 0, mentioned)
+    s.inflight = msg -- sent again if a resumed session turns out to be gone
+    if s.replay then
+      msg, s.replay = replay(s) .. msg, false
+    end
     s.log = {}
     table.insert(s.exchanges, {
       q = text,
@@ -1005,11 +1152,16 @@ function M.open(opts)
 
   -- Hidden or unfocused, the conversation goes on; enter() comes back to it.
   local function enter()
+    M.hide(chat) -- one chat is shown at a time
     if not focused() then
       s.from, s.from_buf, s.cursor = vim.api.nvim_get_current_win(), vim.api.nvim_get_current_buf(),
         vim.api.nvim_win_get_cursor(0)
     end
-    s.hidden = false
+    uses = uses + 1
+    current, chat.used = chat, uses
+    s.hidden, s.unread = false, false
+    highlight_selection()
+    update_status()
     layout()
     if streaming() then -- the cursor sits in the conversation, as after sending
       vim.api.nvim_set_current_win(s.twin)
@@ -1024,6 +1176,8 @@ function M.open(opts)
       leave(false)
     end
     s.hidden = hidden
+    highlight_selection()
+    update_status()
     layout()
   end
   for _, key in ipairs({ { opts.hide_key, true }, { opts.unfocus_key, false } }) do
@@ -1097,15 +1251,39 @@ function M.open(opts)
     submit()
   end
 
-  active = {
+  chat = {
+    id = s.id,
+    used = 0, -- when last opened or shown (see `uses`)
     focus = enter,
     close = close,
     send = send,
+    layout = layout,
     hide = function()
       set_hidden(true)
     end,
     hidden = function()
       return s.hidden
+    end,
+    -- "streaming" while its edit writes into `buf`, "pending" while its diff
+    -- there waits for review, else nil.
+    holds = function(buf)
+      return s.buf == buf and (reviewing and "pending" or editing and "streaming") or nil
+    end,
+    -- A reply is streaming (not an edit waiting for review).
+    answering = function()
+      return streaming() and not reviewing
+    end,
+    -- A reply ended while hidden, and the chat was not shown since.
+    unread = function()
+      return s.unread
+    end,
+    -- "demo.lua · L2–6", the chat's latest question
+    label = function()
+      sync_selection()
+      local name = vim.api.nvim_buf_get_name(s.buf)
+      local ex = s.exchanges[#s.exchanges]
+      return string.format("%s · L%s%s", name == "" and "[No Name]" or vim.fn.fnamemodify(name, ":t"),
+        s.first == s.last and s.first or s.first .. "–" .. s.last, ex and " · " .. summary(ex.q) or "")
     end,
     -- The buffer and lines the conversation is about.
     source = function()
@@ -1144,23 +1322,67 @@ function M.open(opts)
       end)
     end,
   }
-  -- Start the CLI now so its startup overlaps with typing the prompt.
-  local err
-  proc, err = claude.start({
-    cmd = opts.cmd,
-    model = s.model,
-    effort = s.effort,
-    instructions = instructions(opts, s.buf),
-    on_delta = on_delta,
-    on_done = on_done,
-    on_error = fail,
-    on_model = function(model)
-      s.reported = model:gsub("^claude%-", "") -- "claude-opus-5-5": "opus-5-5"
-      layout()
-    end,
-  })
-  if not proc then
-    return fail(err)
+  table.insert(chats, chat)
+  uses = uses + 1
+  current, chat.used = chat, uses
+  for _, c in ipairs(chats) do -- their headers count the chats
+    c.layout()
+  end
+
+  -- Start the CLI, resuming session `resume` if given. A session that cannot
+  -- be resumed (e.g. deleted) fails before it replies: then a fresh one starts,
+  -- and Claude gets the conversation so far as text with the next message.
+  local function start(resume)
+    local replied = false
+    local err
+    proc, err = claude.start({
+      cmd = opts.cmd,
+      model = s.model,
+      effort = s.effort,
+      instructions = instructions(opts, s.buf),
+      persist = opts.history ~= false,
+      resume = resume,
+      on_delta = function(text)
+        replied = true
+        on_delta(text)
+      end,
+      on_done = function()
+        replied = true
+        on_done()
+      end,
+      on_error = function(msg)
+        if not resume or replied then
+          return fail(msg)
+        end
+        proc.stop()
+        local last = vim.iter(s.exchanges):rev():find(function(ex)
+          return ex.done
+        end)
+        last.notice = string.format("Claude could not resume this chat (%s), so it gets the conversation above as text.", msg)
+        s.replay = true
+        start(nil)
+        if proc and streaming() then -- the message sent to the session that failed
+          s.replay = false
+          proc.send(replay(s) .. s.inflight)
+        end
+        layout()
+      end,
+      on_model = function(model)
+        s.reported = model:gsub("^claude%-", "") -- "claude-opus-5-5": "opus-5-5"
+        layout()
+      end,
+      on_session = function(id)
+        s.session = id
+      end,
+    })
+    if not proc then
+      return fail(err)
+    end
+  end
+  -- Started now, so its startup overlaps with typing the prompt.
+  start(s.session)
+  if closed then
+    return
   end
   layout()
   if opts.send then
@@ -1171,27 +1393,72 @@ function M.open(opts)
   return s
 end
 
----Focus the open popup, showing it first if hidden.
----@return boolean focused false when no popup is open
+---Focus the current chat (the one shown last), showing it first if hidden.
+---@return boolean focused false when no chat is open
 function M.focus()
-  if not active then
+  if not current then
     return false
   end
-  active.focus()
+  current.focus()
   return true
 end
 
----The open popup, if any: send(text) as a prompt, hide(), hidden(), source()
----for the buffer and lines its conversation is about, and model(), effort(),
----set_model(name), set_effort(level).
-function M.current()
-  return active
+---Hide the shown chat, if any, other than `keep`.
+function M.hide(keep)
+  for _, c in ipairs(chats) do
+    if c ~= keep and not c.hidden() then
+      c.hide()
+    end
+  end
 end
 
----Color the open popup, if any, with the theme namespace `theme_ns`.
+---The current chat (the one shown last), if any: send(text) as a prompt,
+---hide(), hidden(), source() for the buffer and lines its conversation is
+---about, and model(), effort(), set_model(name), set_effort(level).
+function M.current()
+  return current
+end
+
+---The open chats, oldest first; each also has id, focus(), close(),
+---answering(), unread() and label().
+function M.list()
+  return chats
+end
+
+---Show and focus the chat `step` places after the current one (before it,
+---if negative), wrapping around.
+---@return boolean focused false when no chat is open
+function M.cycle(step)
+  if not current then
+    return false
+  end
+  local _, i = find(current.id)
+  chats[(i - 1 + step) % #chats + 1].focus()
+  return true
+end
+
+---Find the open chat with id `id`.
+M.find = find
+
+---A short string for a statusline: a spinner frame of `icons.spinner` while a
+---hidden chat is answering, `icons.unread` when one has a reply not seen yet,
+---else "".
+function M.status(icons)
+  local unread = false
+  for _, c in ipairs(chats) do
+    if c.hidden() and c.answering() then
+      local spinner = icons.spinner
+      return spinner[math.floor(vim.uv.now() / SPIN_MS) % #spinner + 1]
+    end
+    unread = unread or c.unread()
+  end
+  return unread and icons.unread or ""
+end
+
+---Color the open chats with the theme namespace `theme_ns`.
 function M.restyle(theme_ns)
-  if active then
-    active.restyle(theme_ns)
+  for _, c in ipairs(chats) do
+    c.restyle(theme_ns)
   end
 end
 

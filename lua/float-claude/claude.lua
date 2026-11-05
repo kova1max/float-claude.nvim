@@ -19,14 +19,13 @@ local ARGS = {
   "stream-json",
   "--verbose",
   "--include-partial-messages",
-  -- A plain chat: no tools, MCP servers, hooks, settings, skills or saved session.
+  -- A plain chat: no tools, MCP servers, hooks, settings or skills.
   "--tools",
   "",
   "--strict-mcp-config",
   "--setting-sources",
   "",
   "--disable-slash-commands",
-  "--no-session-persistence",
 }
 
 -- Model aliases offered for completion; any model name the CLI takes works.
@@ -40,12 +39,19 @@ M.efforts = { "low", "medium", "high", "xhigh", "max" }
 
 ---Start the CLI. Callbacks run on the main loop. `instructions` are the user's
 ---own, added after the built-in system prompt. `on_model` gets the model the
----CLI reports it runs.
----@param opts { cmd: string[], model: string?, effort: string?, instructions: string?, on_delta: fun(text: string), on_done: fun(), on_error: fun(msg: string), on_model: fun(model: string)? }
+---CLI reports it runs, `on_session` its session id. With `persist` the CLI
+---saves the session, so a later start can `resume` it (a session id).
+---@param opts { cmd: string[], model: string?, effort: string?, instructions: string?, persist: boolean?, resume: string?, on_delta: fun(text: string), on_done: fun(), on_error: fun(msg: string), on_model: fun(model: string)?, on_session: fun(id: string)? }
 ---@return float-claude.Process? process
 ---@return string? err
 function M.start(opts)
   local cmd = vim.list_extend(vim.deepcopy(opts.cmd), ARGS)
+  if not opts.persist then
+    table.insert(cmd, "--no-session-persistence")
+  end
+  if opts.resume then
+    vim.list_extend(cmd, { "--resume", opts.resume })
+  end
   if opts.model then
     vim.list_extend(cmd, { "--model", opts.model })
   end
@@ -91,6 +97,9 @@ function M.start(opts)
     if not ok or type(event) ~= "table" then
       return
     end
+    if opts.on_session and type(event.session_id) == "string" then
+      opts.on_session(event.session_id)
+    end
     if event.type == "stream_event" then
       local e = event.event
       if e.type == "content_block_delta" and e.delta.type == "text_delta" then
@@ -109,7 +118,10 @@ function M.start(opts)
     elseif event.type == "result" then
       busy = false
       if event.is_error then
-        fail(type(event.result) == "string" and event.result or ("request failed (" .. tostring(event.subtype) .. ")"))
+        local errors = type(event.errors) == "table" and event.errors or {}
+        fail(type(event.result) == "string" and event.result
+          or type(errors[1]) == "string" and errors[1]
+          or ("request failed (" .. tostring(event.subtype) .. ")"))
       else
         opts.on_done()
       end
