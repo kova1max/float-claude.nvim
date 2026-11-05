@@ -642,6 +642,22 @@ test("block edit: after a line in the block is deleted by hand, a follow-up edit
   eq({ "x = foo(1)", "y = A(2)", "w = B(4)", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, -1, false)"))
 end)
 
+test("block edit: after the block's last line is deleted by hand, a follow-up edit leaves the line below alone", function()
+  local log = setup({ "ANSWER\nok", "EDIT\nA\nB\nC\n" })
+  lua([[vim.api.nvim_buf_set_lines(0, 0, -1, false, { "x = foo(1)", "y = bar(2)", "z = qux(3)", "w = baz(4)", "end" })]])
+  keys("2G04l<C-v>2j2l ai")
+  keys("hi<CR>")
+  wait("return answered(1)", "the answer")
+  keys("<C-o>")
+  keys("4Gdd")
+  keys(" ai")
+  eq("  [No Name] · L2–3 · 2 lines · block", floats()["float-claude-transcript"].lines[2], "the header follows")
+  keys("again<CR>")
+  wait("return answered(2)", "the edit")
+  assert(sent(log)[3]:find("<selection>\nbar\nqux\n</selection>\nRequest: again", 1, true), sent(log)[3])
+  eq({ "x = foo(1)", "y = A(2)", "z = B(3)", "C", "end" }, lua("return vim.api.nvim_buf_get_lines(1, 0, -1, false)"))
+end)
+
 -- The pending ranges in buffer 1: { row, end row, label } each.
 local function pending()
   return lua([[

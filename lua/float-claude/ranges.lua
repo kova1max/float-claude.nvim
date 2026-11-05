@@ -71,9 +71,10 @@ function M.lines(first, last)
 end
 
 ---Track the range `s` describes in `buf` with extmarks in `ns`, highlighted
----with `hl` when given. Returns the range: { marks, block, from }.
+---with `hl` when given. Returns the range: { marks, lines, block, from }
+---(`lines`: for a block, a mark per row on its whole line).
 function M.track(buf, ns, s, hl)
-  local r = { marks = {}, block = s.from ~= nil or s.rows ~= nil, from = s.from }
+  local r = { marks = {}, lines = {}, block = s.from ~= nil or s.rows ~= nil, from = s.from }
   local count = vim.api.nvim_buf_line_count(buf)
   if not r.block then
     local last_line = vim.api.nvim_buf_get_lines(buf, s.last - 1, s.last, false)[1]
@@ -107,6 +108,13 @@ function M.track(buf, ns, s, hl)
       hl_group = hl,
       priority = 200,
     }))
+    -- Its line: gone (invalid) only once the line is deleted.
+    table.insert(r.lines, vim.api.nvim_buf_set_extmark(buf, ns, row[1] - 1, 0, {
+      end_row = row[1],
+      end_col = 0,
+      strict = false,
+      invalidate = true,
+    }))
   end
   return r
 end
@@ -131,19 +139,20 @@ end
 
 ---Stop tracking range `r`.
 function M.untrack(buf, ns, r)
-  for _, id in ipairs(r.marks) do
+  for _, id in ipairs(vim.list_extend(vim.list_slice(r.marks), r.lines)) do
     pcall(vim.api.nvim_buf_del_extmark, buf, ns, id)
   end
 end
 
 ---Where range `r` is now, as a spec { first, last, rows?, from? } (rows for
 ---a block); nil if its marks are gone. Lines all deleted: the line that took
----their place.
+---their place; a block's rows whose lines were deleted are gone.
 function M.read(buf, ns, r)
   local marks = {}
-  for _, id in ipairs(r.marks) do
+  for k, id in ipairs(r.marks) do
     local m = vim.api.nvim_buf_get_extmark_by_id(buf, ns, id, { details = true })
-    if m[1] then
+    local line = r.lines[k] and vim.api.nvim_buf_get_extmark_by_id(buf, ns, r.lines[k], { details = true })
+    if m[1] and not (line and line[3].invalid) then
       table.insert(marks, m)
     end
   end
@@ -158,13 +167,12 @@ function M.read(buf, ns, r)
   for _, m in ipairs(marks) do
     -- A part's line joined with another one's: the part now ends on that line.
     local ecol = math.max(m[3].end_row == m[1] and m[3].end_col or #vim.fn.getbufline(buf, m[1] + 1)[1], m[2])
-    -- Parts now on one line (a line deleted or joined) are one part: a part
-    -- emptied by its line's deletion does not count next to another.
+    -- Parts now on one line (lines joined) are one part.
     local row = by_line[m[1] + 1]
-    if not row or row[2] == row[3] then
-      by_line[m[1] + 1] = { m[1] + 1, m[2], ecol }
-    elseif m[2] < ecol then
+    if row then
       row[2], row[3] = math.min(row[2], m[2]), math.max(row[3], ecol)
+    else
+      by_line[m[1] + 1] = { m[1] + 1, m[2], ecol }
     end
   end
   local rows = vim.tbl_values(by_line)
