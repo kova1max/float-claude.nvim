@@ -907,8 +907,8 @@ function M.open(opts)
     local ex = s.exchanges[#s.exchanges]
     for i, c in ipairs(chats) do
       local held = c ~= chat and c.holds(s.buf)
-      if held then -- one chat edits a buffer at a time: the reply stays an answer
-        ex.a = code
+      if held then -- one chat edits a buffer at a time: the reply stays an answer, its code a code block
+        ex.a = "```\n" .. code
         ex.notice = string.format(held == "pending" and "chat %d/%d has an edit pending on this file - accept or discard it first"
           or "chat %d/%d is editing this file - ask again once it is done", i, #chats)
         table.insert(s.log, string.format('- Your EDIT for "%s" was not applied: another chat was editing the file.', summary(ex.q)))

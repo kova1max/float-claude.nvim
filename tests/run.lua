@@ -1842,8 +1842,16 @@ test("multiple chats: an edit while another chat's diff waits on the file is ref
   keys("8GVj ai")
   keys("two<CR>")
   wait("return answered(1)", "chat 2's reply")
-  eq({ "  ❯ two", "    a()", "", "  chat 1/2 has an edit pending on this file -", "  accept or discard it first", "" }, turns(),
-    "the reply stays as text, with a note")
+  eq({ "  ❯ two", "      a()", "", "  chat 1/2 has an edit pending on this file -", "  accept or discard it first", "" }, turns(),
+    "the reply stays as a code block, indented as sent, with a note")
+  eq("@function.call.lua", lua([[
+    local b = vim.api.nvim_win_get_buf(vim.iter(vim.api.nvim_list_wins()):find(function(w)
+      return vim.bo[vim.api.nvim_win_get_buf(w)].filetype == "float-claude-transcript" and not vim.api.nvim_win_get_config(w).hide
+    end))
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(b, -1, { 3, 0 }, { 3, -1 }, { details = true })) do
+      if m[4].hl_group == "@function.call.lua" then return m[4].hl_group end
+    end
+  ]]), "highlighted as the source's language")
   eq({ 2, ORIGINAL }, { lua("return #require('float-claude.chat').list()"), buffer() }, "chat 2 open, nothing written")
   keys("<Esc> ap")
   eq({ "  [No Name] · L2–6 · 5 lines · 1/2", "float-claude-transcript" }, { shown_header(), lua("return vim.bo.filetype") },
@@ -1868,8 +1876,8 @@ test("multiple chats: an edit while a hidden chat's edit streams into the file i
   keys("8GVj ai")
   keys("two<CR>")
   wait("return answered(1)", "chat 2's reply")
-  eq({ "  ❯ two", "    a()", "    b()", "    c()", "", "  chat 1/2 is editing this file - ask again once", "  it is done", "" },
-    turns(), "the reply stays as text, with a note")
+  eq({ "  ❯ two", "      a()", "      b()", "      c()", "", "  chat 1/2 is editing this file - ask again once", "  it is done", "" },
+    turns(), "the reply stays as a code block, indented as sent, with a note")
   wait("return not require('float-claude.chat').list()[1].answering()", "chat 1's edit")
   eq({ "function f(nums)", "  a()", "  b()", "  c()", "end", "-- 8", "-- 9" }, buffer(), "only chat 1's edit written")
   lua("vim.api.nvim_set_current_win(1000)")
