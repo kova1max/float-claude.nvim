@@ -5,7 +5,7 @@
 
 io.stdout:setvbuf("line") -- results show as they come, also when piped
 local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
-local failures, chan = 0, nil
+local failures, total, chan = 0, 0, nil
 -- Children keep their state (swap, shada, logs) out of the user's directories.
 local xdg = vim.fn.tempname()
 local env = {}
@@ -61,6 +61,7 @@ local function test(name, fn)
   vim.fn.jobstop(chan)
   io.stdout:write((ok and "ok   " or "FAIL ") .. name .. (ok and "" or ("\n     " .. err)) .. "\n")
   failures = failures + (ok and 0 or 1)
+  total = total + 1
 end
 
 local ORIGINAL = {
@@ -2539,8 +2540,8 @@ test(":help float-claude: the tags build and every link resolves", function()
   eq("float-claude.txt", file, ":help float-claude")
 end)
 
+-- CI reads this line for the README badge.
+io.stdout:write(string.format("%d/%d passed\n", total - failures, total))
 if failures > 0 then
-  io.stdout:write(failures .. " failed\n")
   os.exit(1)
 end
-io.stdout:write("all passed\n")

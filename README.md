@@ -3,7 +3,7 @@
 <p align="center"><b>Select code, press a key, ask Claude.</b><br>A tiny popup answers, or rewrites the selection in place, with your Claude Code subscription.</p>
 
 <p align="center">
-  <a href="https://github.com/kova1max/float-claude.nvim/actions/workflows/test.yml"><img src="https://github.com/kova1max/float-claude.nvim/actions/workflows/test.yml/badge.svg" alt="tests"></a>
+  <a href="https://github.com/kova1max/float-claude.nvim/actions/workflows/test.yml"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fkova1max%2Ffloat-claude.nvim%2Fbadges%2Ftests.json" alt="tests"></a>
   <img src="https://img.shields.io/badge/Neovim-0.10%20%7C%200.11%20%7C%200.12-57A143?logo=neovim&logoColor=white" alt="Neovim 0.10, 0.11, 0.12">
   <img src="https://img.shields.io/badge/dependencies-none-blue" alt="no dependencies">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT license"></a>

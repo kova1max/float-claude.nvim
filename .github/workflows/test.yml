@@ -8,6 +8,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         version: [v0.10.0, stable]
@@ -17,4 +19,49 @@ jobs:
         with:
           neovim: true
           version: ${{ matrix.version }}
-      - run: nvim --clean --headless -l tests/run.lua
+      - run: nvim --clean --headless -l tests/run.lua | tee test.log
+        shell: bash # with pipefail, so a failing run still fails the job
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log-${{ matrix.version }}
+          path: test.log
+
+  # The README badge is a shields.io endpoint reading tests.json on the badges branch.
+  badge:
+    needs: test
+    if: ${{ !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: badge
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-log-*
+          path: logs
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/master | cut -f1)
+          if [ "$head" != "$GITHUB_SHA" ]; then echo "master moved to $head, skipping"; exit 0; fi
+          message= color=brightgreen
+          for log in logs/*/test.log; do
+            count=$(sed -n 's|^\([0-9]*/[0-9]*\) passed$|\1|p' "$log" 2>/dev/null || true)
+            if [ -z "$count" ]; then message=error color=red; break; fi
+            message=$count
+            if [ "${count%/*}" != "${count#*/}" ]; then color=red; break; fi
+          done
+          if [ "$color" = brightgreen ] && { [ -z "$message" ] || [ "$TEST_RESULT" != success ]; }; then
+            message=error color=red
+          fi
+          mkdir badges
+          printf '{"schemaVersion":1,"label":"tests","message":"%s","color":"%s"}\n' "$message" "$color" > badges/tests.json
+          cd badges
+          git init -q -b badges
+          git add tests.json
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -qm "tests: $message"
+          git push -qf "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" badges
