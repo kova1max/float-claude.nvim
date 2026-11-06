@@ -5,11 +5,16 @@ on:
     branches: [master]
   pull_request:
 
+# A newer master push cancels the older run, so an older count never overwrites the badge.
+concurrency:
+  group: ${{ github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # the stable job on master pushes the badge to the badges branch
+      contents: read
     strategy:
       matrix:
         version: [v0.10.0, stable]
@@ -21,15 +26,38 @@ jobs:
           version: ${{ matrix.version }}
       - run: nvim --clean --headless -l tests/run.lua | tee test.log
         shell: bash # with pipefail, so a failing run still fails the job
-      # The README badge is a shields.io endpoint reading tests.json on the badges branch.
-      - if: ${{ !cancelled() && github.event_name == 'push' && matrix.version == 'stable' }}
-        env:
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log-${{ matrix.version }}
+          path: test.log
+
+  # The README badge is a shields.io endpoint reading tests.json on the badges branch.
+  badge:
+    needs: test
+    if: ${{ !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-log-*
+          path: logs
+      - env:
           GH_TOKEN: ${{ github.token }}
+          TEST_RESULT: ${{ needs.test.result }}
         run: |
-          message=$(sed -n 's|^\([0-9]*/[0-9]*\) passed$|\1|p' test.log)
-          if [ -z "$message" ]; then message=error color=red
-          elif [ "${message%/*}" = "${message#*/}" ]; then color=brightgreen
-          else color=red; fi
+          message= color=brightgreen
+          for log in logs/*/test.log; do
+            count=$(sed -n 's|^\([0-9]*/[0-9]*\) passed$|\1|p' "$log" 2>/dev/null || true)
+            if [ -z "$count" ]; then message=error color=red; break; fi
+            message=$count
+            if [ "${count%/*}" != "${count#*/}" ]; then color=red; break; fi
+          done
+          if [ "$color" = brightgreen ] && { [ -z "$message" ] || [ "$TEST_RESULT" != success ]; }; then
+            message=error color=red
+          fi
           mkdir badges
           printf '{"schemaVersion":1,"label":"tests","message":"%s","color":"%s"}\n' "$message" "$color" > badges/tests.json
           cd badges
